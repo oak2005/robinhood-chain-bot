@@ -1,17 +1,16 @@
 name: trade
-# schedule armed
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "7,37 * * * *"
 permissions:
   contents: write
+  actions: write
 concurrency:
   group: robinhood-trade
   cancel-in-progress: false
 jobs:
   trade:
     runs-on: ubuntu-latest
+    environment: next-cycle
     timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
@@ -69,3 +68,17 @@ jobs:
           fi
           git commit -m "state"
           git push
+
+      - name: Arm the next cycle
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          open=$(gh run list --workflow trade.yml --limit 20 --json status --jq '[.[] | select(.status=="waiting" or .status=="queued" or .status=="pending" or .status=="in_progress" or .status=="requested")] | length')
+          if [ "$open" -gt 1 ]; then
+            echo "already armed"
+            exit 0
+          fi
+          gh workflow run trade.yml --ref main
+          echo "next cycle armed"
