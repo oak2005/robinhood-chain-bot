@@ -5,6 +5,9 @@ on:
     - cron: "*/10 * * * *"
 permissions:
   contents: write
+concurrency:
+  group: robinhood-trade
+  cancel-in-progress: false
 jobs:
   trade:
     runs-on: ubuntu-latest
@@ -30,6 +33,25 @@ jobs:
           test -s .secrets/robinhood_creds.json
           test -s .secrets/telegram_bot_token
           test -s .secrets/telegram_admin_id
+      - name: Check secret shape
+        run: |
+          node --input-type=module -e '
+          import fs from "node:fs";
+          const raw = JSON.parse(fs.readFileSync(".secrets/robinhood_creds.json","utf8"));
+          const key = String(raw.privateKeyHex || "").replace(/^0x/, "");
+          const addr = String(raw.address || "");
+          const token = fs.readFileSync(".secrets/telegram_bot_token","utf8").trim();
+          const admin = fs.readFileSync(".secrets/telegram_admin_id","utf8").trim();
+          if (raw.type !== "wallet" || !/^[0-9a-fA-F]{64}$/.test(key) || !/^0x[0-9a-fA-F]{40}$/.test(addr)) {
+            console.log("creds bad");
+            process.exit(1);
+          }
+          if (!token.includes(":") || !/^\d{6,}$/.test(admin)) {
+            console.log("telegram bad");
+            process.exit(1);
+          }
+          console.log("secrets ok");
+          '
       - name: One due round trip
         env:
           STILLMARK_ROOT: ${{ github.workspace }}
