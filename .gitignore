@@ -1,0 +1,6 @@
+node_modules
+.secrets
+data/bot.log
+data/cycle.lock
+data/external-runner
+data/bot.heartbeat

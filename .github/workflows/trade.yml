@@ -1,0 +1,48 @@
+name: trade
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/10 * * * *"
+permissions:
+  contents: write
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install --omit=dev --no-audit --no-fund
+      - name: Write secrets outside git
+        env:
+          ROBINHOOD_CREDS: ${{ secrets.ROBINHOOD_CREDS }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_ADMIN_ID: ${{ secrets.TELEGRAM_ADMIN_ID }}
+        run: |
+          set -eu
+          mkdir -p .secrets data
+          printf '%s\n' "$ROBINHOOD_CREDS" > .secrets/robinhood_creds.json
+          printf '%s\n' "$TELEGRAM_BOT_TOKEN" > .secrets/telegram_bot_token
+          printf '%s\n' "$TELEGRAM_ADMIN_ID" > .secrets/telegram_admin_id
+          chmod 600 .secrets/*
+          test -s .secrets/robinhood_creds.json
+          test -s .secrets/telegram_bot_token
+          test -s .secrets/telegram_admin_id
+      - name: One due round trip
+        env:
+          STILLMARK_ROOT: ${{ github.workspace }}
+        run: node --experimental-strip-types src/lib/telegram/wake-once.ts
+      - name: Save state
+        run: |
+          set -eu
+          rm -rf .secrets
+          git config user.email "bot@users.noreply.github.com"
+          git config user.name "robinhood-bot"
+          git add data/*.json data/telegram_offset
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "state"
+          git push
