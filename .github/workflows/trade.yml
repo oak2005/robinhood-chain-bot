@@ -1,4 +1,5 @@
 name: trade
+# schedule armed
 on:
   workflow_dispatch:
   schedule:
