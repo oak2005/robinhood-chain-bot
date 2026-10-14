@@ -60,6 +60,14 @@ jobs:
         run: |
           set -eu
           rm -rf .secrets
+          cp data/stillmark-bot.json /tmp/stillmark-bot.json
+          cp data/clip-cycle.json /tmp/clip-cycle.json
+          cp data/telegram_offset /tmp/telegram_offset
+          git fetch origin main
+          git reset --hard origin/main
+          cp /tmp/stillmark-bot.json data/stillmark-bot.json
+          cp /tmp/clip-cycle.json data/clip-cycle.json
+          cp /tmp/telegram_offset data/telegram_offset
           git config user.email "bot@users.noreply.github.com"
           git config user.name "robinhood-bot"
           git add data/*.json data/telegram_offset
@@ -67,10 +75,10 @@ jobs:
             exit 0
           fi
           git commit -m "state"
-          git push
+          git push origin HEAD:main
 
       - name: Arm the next cycle
-        if: success()
+        if: success() || failure()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
