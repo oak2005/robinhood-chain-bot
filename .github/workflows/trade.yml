@@ -52,6 +52,11 @@ jobs:
           }
           console.log("secrets ok");
           '
+      - name: Use the latest saved clock
+        run: |
+          set -eu
+          git fetch origin main
+          git checkout origin/main -- data/stillmark-bot.json data/clip-cycle.json data/telegram_offset
       - name: One due round trip
         env:
           STILLMARK_ROOT: ${{ github.workspace }}
@@ -83,8 +88,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          open=$(gh run list --workflow trade.yml --limit 20 --json status --jq '[.[] | select(.status=="waiting" or .status=="queued" or .status=="pending" or .status=="in_progress" or .status=="requested")] | length')
-          if [ "$open" -gt 1 ]; then
+          waiting=$(gh run list --workflow trade.yml --limit 20 --json status --jq '[.[] | select(.status=="waiting")] | length')
+          if [ "$waiting" -ge 1 ]; then
             echo "already armed"
             exit 0
           fi
