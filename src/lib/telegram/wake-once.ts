@@ -29,6 +29,7 @@ type BotState = {
   config?: { interval?: string };
   token?: { address: string; symbol: string; decimals: number; name?: string } | null;
   pool?: V4Pool | null;
+  lastPreview?: string;
 };
 
 function nextLine(state: BotState): string {
@@ -54,6 +55,7 @@ async function liveLine(state: BotState, address: string): Promise<string> {
       pool: state.pool ?? null,
     });
     if (preview.pool) state.pool = preview.pool;
+    state.lastPreview = preview.text;
     return preview.text;
   } catch (error) {
     return error instanceof Error ? error.message : "Could not read the chain.";
@@ -150,7 +152,7 @@ async function drainCommands() {
         const head = [modeLine(state), nextLine(state)];
         if (state.token) head.push(state.token.symbol, state.token.address);
         reply = `${head.join("\n")}\n${await chainText()}`;
-        dirty = state.pool != null;
+        dirty = Boolean(state.pool) || Boolean(state.lastPreview);
       } else if (cmd === "/config") {
         const interval = state.config?.interval ?? "30m";
         reply = [
@@ -160,7 +162,7 @@ async function drainCommands() {
           nextLine(state),
           await chainText(),
         ].join("\n");
-        dirty = state.pool != null;
+        dirty = Boolean(state.pool) || Boolean(state.lastPreview);
       } else if (cmd === "/help") {
         reply = [
           "Buttons answer in this chat.",
@@ -180,7 +182,7 @@ async function drainCommands() {
           reply = `Interval set to ${key}. ${nextLine(state)}`;
         }
       } else if (cmd === "/addkey" || cmd === "/addtoken" || cmd === "/removekey") {
-        reply = "Do not send a private key in this chat. Add a fresh wallet on https://robinhood-chain-bot-production.up.railway.app so this chat never stores it.";
+        reply = "Do not send a private key in this chat. Tap Add key, then send a fresh wallet key in the next message. It is not stored in the chat log here.";
       }
       if (!reply) continue;
       if (dirty) fs.writeFileSync(statePath, JSON.stringify(state));
@@ -204,17 +206,17 @@ function guestReply(cmd: string): string {
     return "This account cannot pause or stop the running swaps.";
   }
   if (cmd === "/addkey" || cmd === "/addtoken" || cmd === "/removekey") {
-    return "Do not send a private key here. Open https://robinhood-chain-bot-production.up.railway.app and add a fresh wallet there. Your account is separate.";
+    return "Tap Add key. The next message should be a fresh wallet private key, not the wallet already trading. Then tap Add token.";
   }
   if (cmd === "/balance" || cmd === "/status" || cmd === "/tokeninfo" || cmd === "/config") {
-    return "This Telegram account has no wallet yet. Add a fresh wallet on https://robinhood-chain-bot-production.up.railway.app. Do not paste the key in this chat.";
+    return "No wallet is saved for this Telegram account yet. Tap Add key.";
   }
   return [
     "Inactivity Trade is on.",
     "Your account is separate from the wallet that is already trading.",
-    "Help, Balance, Token, and Add token all answer here.",
-    "Add the wallet on https://robinhood-chain-bot-production.up.railway.app",
-    "Never send a private key in Telegram.",
+    "Tap Add key, then send a fresh wallet key.",
+    "Tap Add token for the coin.",
+    "Do not use the wallet that is already running.",
   ].join("\n");
 }
 

@@ -112,7 +112,7 @@ jobs:
           set -eu
           for attempt in 1 2 3 4 5; do
             waiting=$(gh run list --workflow trade.yml --limit 20 --json status --jq '[.[] | select(.status=="waiting")] | length')
-            if [ "$waiting" -ge 1 ]; then
+            if gh run list --workflow trade.yml --limit 20 --json status,createdAt --jq -e 'any(.[]; .status=="waiting" and ((now - (.createdAt | fromdateiso8601)) < 300))' >/dev/null; then
               echo "already armed"
               exit 0
             fi
