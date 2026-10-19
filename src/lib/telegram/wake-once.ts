@@ -247,7 +247,7 @@ async function drainCommands() {
 
 function guestReply(cmd: string): string {
   if (cmd === "/pay") {
-    return "Access is at least $20 USD per 30 days in USDT or USDC on Solana, Base, or BNB. Tap Pay or send /pay on Railway.";
+    return "Access is at least $20 USD per 30 days in USDT, USDC, or USDG on Solana, Base, BNB, or Robinhood. Tap Pay or send /pay on Railway.";
   }
   if (cmd === "/pause" || cmd === "/resume" || cmd === "/stop" || cmd === "/emergency_stop" || cmd === "/interval") {
     return "This account cannot pause or stop the running swaps.";

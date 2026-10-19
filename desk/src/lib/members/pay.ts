@@ -17,9 +17,12 @@ const EVM_TOKENS = {
     { symbol: "USDT", address: "0x55d398326f99059ff775485246999027b3197955", decimals: 18 },
     { symbol: "USDC", address: "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d", decimals: 18 },
   ],
+  robinhood: [
+    { symbol: "USDG", address: "0x5fc5360d0400a0fd4f2af552add042d716f1d168", decimals: 6 },
+  ],
 } as const;
 
-export type PayChain = "solana" | "base" | "bsc";
+export type PayChain = "solana" | "base" | "bsc" | "robinhood";
 
 type Verdict = { ok: true; asset: string; amount: string } | { ok: false; error: string };
 
@@ -42,7 +45,7 @@ export function readSolanaPayment(tx: SolanaTx, memo: string): Verdict {
   return { ok: false, error: "No USDT or USDC arrived in that transaction." };
 }
 
-export function readEvmPayment(chain: "base" | "bsc", tx: EvmTx, receipt: EvmReceipt, memo: string): Verdict {
+export function readEvmPayment(chain: "base" | "bsc" | "robinhood", tx: EvmTx, receipt: EvmReceipt, memo: string): Verdict {
   if (receipt.status !== "0x1") return { ok: false, error: "That transaction failed." };
   const wanted = PAY_EVM.toLowerCase();
   const padded = `0x${wanted.slice(2).padStart(64, "0")}`;
@@ -68,7 +71,12 @@ export function readEvmPayment(chain: "base" | "bsc", tx: EvmTx, receipt: EvmRec
       }
     }
   }
-  return { ok: false, error: "That transaction did not send USDT or USDC to the payment address on this chain." };
+  return {
+    ok: false,
+    error: chain === "robinhood"
+      ? "That transaction did not send USDG to the payment address on Robinhood Chain."
+      : "That transaction did not send USDT or USDC to the payment address on this chain.",
+  };
 }
 
 function memos(tx: SolanaTx): string {
@@ -102,6 +110,7 @@ const RPC: Record<PayChain, string> = {
   solana: "https://api.mainnet-beta.solana.com",
   base: "https://mainnet.base.org",
   bsc: "https://bsc-dataseed.binance.org",
+  robinhood: "https://rpc.robinhoodchain.com",
 };
 
 export async function lookupPayment(chain: PayChain, txHash: string, memo: string): Promise<Verdict> {
@@ -111,7 +120,7 @@ export async function lookupPayment(chain: PayChain, txHash: string, memo: strin
     if (!tx) return { ok: false, error: "That Solana transaction was not found." };
     return readSolanaPayment(tx, memo);
   }
-  if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) return { ok: false, error: "That is not a Base or BNB transaction hash." };
+  if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) return { ok: false, error: "That is not a Base, BNB, or Robinhood transaction hash." };
   const [tx, receipt] = await Promise.all([
     rpc<EvmTx>(RPC[chain], "eth_getTransactionByHash", [txHash]),
     rpc<EvmReceipt | null>(RPC[chain], "eth_getTransactionReceipt", [txHash]),

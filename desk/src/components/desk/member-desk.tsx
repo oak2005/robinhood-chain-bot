@@ -7,7 +7,7 @@ import { addSlot, confirmPayment, getAccess, operatorBoard, removeSlot } from "@
 import { DONATION_USD, LADDER_USD, MAX_ROUND_TRIP_PCT, MAX_TOKENS, PAY_EVM, PAY_SOLANA, type OperatorRow, type PublicAccess } from "@/lib/members/public";
 
 type Chain = "solana" | "stacks" | "robinhood";
-type PayChain = "solana" | "base" | "bsc";
+type PayChain = "solana" | "base" | "bsc" | "robinhood";
 type Interval = "10m" | "20m" | "30m" | "1h";
 
 const CHAINS: Chain[] = ["solana", "stacks", "robinhood"];
@@ -192,14 +192,14 @@ function Payment({ access, payChain, txHash, busy, onChain, onTx, onPay }: { acc
     <div className="space-y-3 rounded-3xl border border-line bg-surface p-4">
       <p className="text-sm text-subtle">{access.covered ? "Month covered" : "Month due"}</p>
       <p className="font-display text-2xl text-fg">{access.memo}</p>
-      <p className="text-sm text-muted">Your memo. It is unique to this account. Only USDT or USDC counts.</p>
-      <p className="text-sm text-fg">{"Solana, Base, or BNB. Send $" + DONATION_USD + " or more in USDT or USDC, and put memo " + access.memo + " in the transaction. More than $20 is fine. Under $20, or a missing memo, is rejected."}</p>
-      <p className="text-sm text-muted">{"Solana " + PAY_SOLANA}</p>
-      <p className="text-sm text-muted">{"Base and BNB " + PAY_EVM}</p>
-      <div className="grid grid-cols-3 gap-2">
-        {(["solana", "base", "bsc"] as const).map((item) => (
+      <p className="text-sm text-muted">Your memo. It is unique to this account. Only USDT, USDC, or USDG counts.</p>
+      <p className="text-sm text-fg">{"Solana, Base, BNB, or Robinhood Chain. Send $" + DONATION_USD + " or more in USDT, USDC, or USDG, and put memo " + access.memo + " in the transaction. More than $20 is fine. Under $20, or a missing memo, is rejected."}</p>
+      <p className="text-sm text-muted">{"Solana: " + PAY_SOLANA}</p>
+      <p className="text-sm text-muted">{"Base, BNB, & Robinhood Chain: " + PAY_EVM}</p>
+      <div className="grid grid-cols-4 gap-2">
+        {(["solana", "base", "bsc", "robinhood"] as const).map((item) => (
           <button key={item} type="button" onClick={() => onChain(item)} className={`min-h-11 rounded-2xl border text-sm ${payChain === item ? "border-accent bg-accent text-accent-fg" : "border-line text-fg"}`}>
-            {item === "bsc" ? "BNB" : item === "base" ? "Base" : "Solana"}
+            {item === "bsc" ? "BNB" : item === "base" ? "Base" : item === "robinhood" ? "Robinhood" : "Solana"}
           </button>
         ))}
       </div>
@@ -227,7 +227,7 @@ function Guide() {
       <p>Each account can run up to {MAX_TOKENS} different tokens. A token can be on Solana, Stacks, or Robinhood. After the quiet interval, that token sells one dollar clip and buys the same dollar amount back. It does not withdraw.</p>
       <h2 className="font-display text-2xl text-fg">The calculations</h2>
       <p>The clip rotates: {LADDER_USD.map((usd) => `$${usd.toFixed(2)}`).join(", ")}. Then it repeats. If the bag is smaller than the target, that cycle uses the bag. The quoted round trip is skipped when it is worse than {MAX_ROUND_TRIP_PCT}%. Gas is the network price, with no tip.</p>
-      <p>{"Access is $" + DONATION_USD + " or more for 30 days, in USDT or USDC only, on Solana, Base, or BNB. The memo has to be in the transaction on every chain. A payment under $20 is rejected. The same transaction cannot be used twice."}</p>
+      <p>{"Access is $" + DONATION_USD + " or more for 30 days, in USDT, USDC, or USDG, on Solana, Base, BNB, or Robinhood Chain. The memo has to be in the transaction on every chain. A payment under $20 is rejected. The same transaction cannot be used twice."}</p>
       <h2 className="font-display text-2xl text-fg">The key</h2>
       <p>Use a fresh wallet. The key is sealed. The operator board shows the address, the token, and whether the month is paid. It does not load the key. Do not add the wallet that is already trading, or that coin will trade twice.</p>
     </article>

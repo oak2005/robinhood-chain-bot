@@ -76,6 +76,31 @@ test("base payment needs the memo and at least 20, and more than 20 is accepted"
   assert.equal(readEvmPayment("base", { input: "0x" + memoHex }, receipt(19_000_000n), memo).ok, false);
 });
 
+test("robinhood payment needs the memo and at least 20 USDG, and more than 20 is accepted", () => {
+  const memo = "K7H2QA";
+  const deposit = `0x${PAY_EVM.slice(2).toLowerCase().padStart(64, "0")}`;
+  const memoHex = Buffer.from(memo, "utf8").toString("hex");
+  const receipt = (data: bigint) => ({
+    status: "0x1",
+    logs: [
+      {
+        address: "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+        topics: ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", "0x" + "11".repeat(32), deposit],
+        data: `0x${data.toString(16)}`,
+      },
+    ],
+  });
+  const okResult = readEvmPayment("robinhood", { input: "0x" + memoHex }, receipt(20_000_000n), memo);
+  assert.equal(okResult.ok, true);
+  if (okResult.ok) {
+    assert.equal(okResult.asset, "USDG");
+    assert.equal(okResult.amount, "20");
+  }
+  assert.equal(readEvmPayment("robinhood", { input: "0x" + memoHex }, receipt(35_500_000n), memo).ok, true);
+  assert.equal(readEvmPayment("robinhood", { input: "0x" }, receipt(25_000_000n), memo).ok, false);
+  assert.equal(readEvmPayment("robinhood", { input: "0x" + memoHex }, receipt(19_999_999n), memo).ok, false);
+});
+
 test("sealed key round-trips and operator payloads have no secret field", () => {
   const secret = "a".repeat(64);
   const wrapped = sealSecret(secret);

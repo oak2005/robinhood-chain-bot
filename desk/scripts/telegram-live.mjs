@@ -219,15 +219,18 @@ async function payInfoText(userId) {
     coveredText,
     "",
     `Your unique memo: ${access.memo}`,
-    "You MUST include this exact memo in the transaction (Solana memo program, or in Base/BNB transaction input).",
+    "You MUST include this exact memo in the transaction (Solana memo program, or in Base/BNB/Robinhood transaction input).",
     "",
-    "Accepted tokens: USDT or USDC (minimum $20)",
+    "Accepted tokens: USDT, USDC, or USDG (minimum $20)",
     "",
-    "Solana deposit:",
+    "Solana deposit (USDT/USDC):",
     "GLrFg8GR7iNotxJRvVHakdbhpRHjEEe8EHXVmjHxNG1T",
     "",
-    "Base / BNB deposit:",
+    "Base / BNB deposit (USDT/USDC) & Robinhood Chain deposit (USDG):",
     "0x4a543eEbBB5DFaA2FE0E4f36E84b0eaf5803D7DD",
+    "",
+    "Robinhood Chain USDG contract:",
+    "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
     "",
     "After sending, paste your transaction hash in this chat to activate.",
   ].join("\n");
@@ -243,7 +246,7 @@ async function verifyPayment(userId, txHash) {
   const isSolana = /^[1-9A-HJ-NP-Za-km-z]{64,128}$/.test(cleanHash);
   const isEvm = /^0x[0-9a-fA-F]{64}$/.test(cleanHash);
   if (!isSolana && !isEvm) {
-    return "That does not look like a valid Solana signature or Base/BNB transaction hash.";
+    return "That does not look like a valid Solana signature or Base/BNB/Robinhood transaction hash.";
   }
 
   const used = await database.query("select tx_hash from used_payments where tx_hash = $1", [cleanHash.toLowerCase()]);
@@ -263,6 +266,12 @@ async function verifyPayment(userId, txHash) {
         if (bscVerdict.ok || !bscVerdict.error.includes("not found")) {
           verdict = bscVerdict;
           chainName = "bsc";
+        } else {
+          const rhVerdict = await lookupPayment("robinhood", cleanHash, access.memo);
+          if (rhVerdict.ok || !rhVerdict.error.includes("not found")) {
+            verdict = rhVerdict;
+            chainName = "robinhood";
+          }
         }
       }
     }
@@ -290,7 +299,7 @@ async function verifyPayment(userId, txHash) {
 
   return [
     `Payment verified!`,
-    `Received: $${verdict.amount} ${verdict.asset} on ${chainName.toUpperCase()}.`,
+    `Received: $${verdict.amount} ${verdict.asset} on ${chainName === "robinhood" ? "Robinhood Chain" : chainName.toUpperCase()}.`,
     `Access extended by 30 days.`,
     `Active until: ${new Date(newPaidUntil).toUTCString()}`,
     `You can now tap Add key and Add token.`,
@@ -473,7 +482,7 @@ function helpText() {
     "Add key: Store your fresh wallet private key (AES-256 sealed).",
     "Add token: Add a coin contract address (up to 3 tokens).",
     "Remove key: Clear your saved wallets and tokens.",
-    "Pay: Access is at least $20/30 days USDT or USDC on Solana, Base, or BNB.",
+    "Pay: Access is at least $20/30 days USDT/USDC on Solana/Base/BNB or USDG on Robinhood.",
     "",
     "Everything stays in this chat. Tap buttons below or use the Menu button at the bottom left.",
   ].join("\n");
@@ -872,7 +881,8 @@ while (true) {
         }
 
         if (mapped.startsWith("/pay") && mapped.split(/\s+/).length > 1) {
-          const txArg = mapped.split(/\s+/)[1];
+          const parts = mapped.split(/\s+/);
+          const txArg = parts.length > 2 && /^(solana|base|bsc|robinhood)$/i.test(parts[1]) ? parts[2] : parts[1];
           const paymentResult = await verifyPayment(userId, txArg);
           await send(chatId, paymentResult);
           continue;
