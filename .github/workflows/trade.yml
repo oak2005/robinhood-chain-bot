@@ -88,10 +88,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          waiting=$(gh run list --workflow trade.yml --limit 20 --json status --jq '[.[] | select(.status=="waiting")] | length')
-          if [ "$waiting" -ge 1 ]; then
-            echo "already armed"
-            exit 0
-          fi
-          gh workflow run trade.yml --ref main
-          echo "next cycle armed"
+          for attempt in 1 2 3 4 5; do
+            waiting=$(gh run list --workflow trade.yml --limit 20 --json status --jq '[.[] | select(.status=="waiting")] | length')
+            if [ "$waiting" -ge 1 ]; then
+              echo "already armed"
+              exit 0
+            fi
+            if gh workflow run trade.yml --ref main; then
+              echo "next cycle armed"
+              exit 0
+            fi
+            echo "dispatch failed, retry ${attempt}"
+            sleep 20
+          done
+          echo "could not arm the next cycle"
+          exit 1
