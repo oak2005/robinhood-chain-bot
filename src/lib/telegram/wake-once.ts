@@ -101,12 +101,23 @@ async function drainCommands() {
       const raw = typeof message?.text === "string" ? message.text.trim() : "";
       const chat = message?.chat as Record<string, unknown> | undefined;
       const chatId = typeof chat?.id === "number" ? chat.id : 0;
-      if (!raw || String(from?.id ?? "") !== admin || !chatId) continue;
+      if (!raw || !chatId) continue;
       const text = BUTTONS[raw] ?? raw;
       if (!text.startsWith("/")) continue;
+      const isAdmin = String(from?.id ?? "") === admin;
       const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as BotState;
       const cmd = text.split(/\s+/)[0]?.split("@")[0] ?? "";
       const arg = text.split(/\s+/)[1] ?? "";
+      if (!isAdmin) {
+        const reply = guestReply(cmd);
+        const sent = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text: reply }),
+        });
+        process.stdout.write(`answered guest ${cmd} ${sent.ok ? "ok" : "fail"}\n`);
+        continue;
+      }
       let reply = "";
       let dirty = false;
       const chainText = async () => {
@@ -114,7 +125,9 @@ async function drainCommands() {
         cached = await liveLine(state, address);
         return cached;
       };
-      if (cmd === "/pause") {
+      if (cmd === "/start") {
+        reply = "Running on its own.\nHelp explains the buttons.\nAnother Telegram account can use Help too. It cannot pause your NASTY swaps.";
+      } else if (cmd === "/pause") {
         state.active = false;
         state.paused = true;
         dirty = true;
@@ -150,11 +163,12 @@ async function drainCommands() {
         dirty = state.pool != null;
       } else if (cmd === "/help") {
         reply = [
-          "Running on GitHub, not in this chat.",
-          "Status, Balance, and Config are answered on the next check, within about 1 minute.",
-          "Pause, Resume, and Stop change the bot the same way.",
+          "Buttons answer in this chat.",
+          "Status, Balance, and Config read the running swap.",
+          "Pause, Resume, and Stop change the next swap.",
           "Interval: send /interval 10m, 20m, 30m, or 1h.",
-          "The wallet and token stay in GitHub secrets. Do not send a private key here.",
+          "Another account can press Help. It cannot stop your swaps.",
+          "Do not send a private key here.",
         ].join("\n");
       } else if (cmd === "/interval") {
         const key = arg in INTERVALS ? arg : "";
@@ -166,7 +180,7 @@ async function drainCommands() {
           reply = `Interval set to ${key}. ${nextLine(state)}`;
         }
       } else if (cmd === "/addkey" || cmd === "/addtoken" || cmd === "/removekey") {
-        reply = "The wallet and token are stored in GitHub secrets. Do not send a private key in this chat.";
+        reply = "Do not send a private key in this chat. Add a fresh wallet on https://robinhood-chain-bot-production.up.railway.app so this chat never stores it.";
       }
       if (!reply) continue;
       if (dirty) fs.writeFileSync(statePath, JSON.stringify(state));
@@ -183,6 +197,25 @@ async function drainCommands() {
   }
   fs.mkdirSync(`${ROOT}/data`, { recursive: true });
   fs.writeFileSync(offsetPath, String(offset));
+}
+
+function guestReply(cmd: string): string {
+  if (cmd === "/pause" || cmd === "/resume" || cmd === "/stop" || cmd === "/emergency_stop" || cmd === "/interval") {
+    return "This account cannot pause or stop the running swaps.";
+  }
+  if (cmd === "/addkey" || cmd === "/addtoken" || cmd === "/removekey") {
+    return "Do not send a private key here. Open https://robinhood-chain-bot-production.up.railway.app and add a fresh wallet there. Your account is separate.";
+  }
+  if (cmd === "/balance" || cmd === "/status" || cmd === "/tokeninfo" || cmd === "/config") {
+    return "This Telegram account has no wallet yet. Add a fresh wallet on https://robinhood-chain-bot-production.up.railway.app. Do not paste the key in this chat.";
+  }
+  return [
+    "Inactivity Trade is on.",
+    "Your account is separate from the wallet that is already trading.",
+    "Help, Balance, Token, and Add token all answer here.",
+    "Add the wallet on https://robinhood-chain-bot-production.up.railway.app",
+    "Never send a private key in Telegram.",
+  ].join("\n");
 }
 
 await (process.env.STILLMARK_SKIP_DRAIN === "1" ? Promise.resolve() : drainCommands().catch(() => undefined));

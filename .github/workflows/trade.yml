@@ -60,7 +60,29 @@ jobs:
       - name: One due round trip
         env:
           STILLMARK_ROOT: ${{ github.workspace }}
-        run: node --experimental-strip-types src/lib/telegram/wake-once.ts
+        run: |
+          set -eu
+          gate=$(curl -fsS --max-time 8 https://robinhood-chain-bot-production.up.railway.app/api/trade-gate || echo '{}')
+          printf '%s' "$gate" > /tmp/gate.json
+          if printf '%s' "$gate" | grep -q '"telegram":true'; then
+            export STILLMARK_SKIP_DRAIN=1
+          fi
+          if printf '%s' "$gate" | grep -q '"paused":true'; then
+            echo "paused from telegram"
+            exit 0
+          fi
+          node --experimental-strip-types -e '
+            import fs from "node:fs";
+            let gate = {};
+            try { gate = JSON.parse(fs.readFileSync("/tmp/gate.json","utf8")); } catch { process.exit(0); }
+            const allowed = ["10m","20m","30m","1h"];
+            if (!allowed.includes(gate.interval)) process.exit(0);
+            const path = "data/stillmark-bot.json";
+            const state = JSON.parse(fs.readFileSync(path,"utf8"));
+            state.config = { ...(state.config ?? {}), interval: gate.interval };
+            fs.writeFileSync(path, JSON.stringify(state));
+          '
+          node --experimental-strip-types src/lib/telegram/wake-once.ts
       - name: Save state
         run: |
           set -eu

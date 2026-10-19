@@ -1,4 +1,4 @@
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Plugin } from "vite";
 import { defineConfig } from "vite";
@@ -159,6 +159,30 @@ function authPopupPlugin(): Plugin {
   };
 }
 
+function tradeGatePlugin(): Plugin {
+  const attach = (middlewares: { use: (path: string, handler: (req: unknown, res: { setHeader: (name: string, value: string) => void; end: (body: string) => void }) => void) => void }) => {
+    middlewares.use("/api/trade-gate", (_req, res) => {
+      let body = '{"telegram":false,"paused":false,"interval":""}';
+      try {
+        body = readFileSync("/tmp/trade-gate.json", "utf8");
+      } catch {
+        /* the poller has not started */
+      }
+      res.setHeader("content-type", "application/json");
+      res.end(body);
+    });
+  };
+  return {
+    name: "trade-gate",
+    configureServer(server) {
+      attach(server.middlewares);
+    },
+    configurePreviewServer(server) {
+      attach(server.middlewares);
+    },
+  };
+}
+
 // `0.0.0.0:8080` is the live-preview contract — don't change host/port.
 // The dev server starts once `src/router.tsx` and `src/routes/` exist — see
 // AGENTS.md § "First scaffold".
@@ -182,6 +206,7 @@ export default defineConfig(({ command, isPreview }) => ({
     appEnvPlugin(),
     // PWA head + ?install=1 tutorial page; runs before Start/Nitro.
     grokPwaPlugin(),
+    tradeGatePlugin(),
     tailwindcss(),
     tanstackStart(),
     ...(command === "build" || isPreview
