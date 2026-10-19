@@ -222,6 +222,33 @@ function guestReply(cmd: string): string {
 
 await (process.env.STILLMARK_SKIP_DRAIN === "1" ? Promise.resolve() : drainCommands().catch(() => undefined));
 const line = await runDueTrade(true);
+try {
+  const statePath = `${ROOT}/data/stillmark-bot.json`;
+  if (fs.existsSync(statePath)) {
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as BotState;
+    let address = "";
+    try {
+      const creds = JSON.parse(fs.readFileSync(`${ROOT}/.secrets/robinhood_creds.json`, "utf8")) as { address?: string };
+      address = creds.address ?? "";
+    } catch {
+      address = "";
+    }
+    if (state.token && address) {
+      const preview = await previewChain({
+        address,
+        token: state.token.address,
+        symbol: state.token.symbol,
+        decimals: state.token.decimals,
+        pool: state.pool ?? null,
+      });
+      if (preview.pool) state.pool = preview.pool;
+      state.lastPreview = preview.text;
+      fs.writeFileSync(statePath, JSON.stringify(state));
+    }
+  }
+} catch {
+  /* keep going even if preview refresh fails */
+}
 const text = line || "watching";
 try {
   fs.appendFileSync(`${ROOT}/data/bot.log`, `${new Date().toISOString()} wake ${text}\n`);
@@ -229,3 +256,4 @@ try {
   /* keep the printed result */
 }
 process.stdout.write(`${text}\n`);
+

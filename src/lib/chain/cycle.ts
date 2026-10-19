@@ -95,9 +95,20 @@ function brief(error: unknown): string {
   return error instanceof Error ? error.message.slice(0, 180) : "Swap failed.";
 }
 
-function readRecovery(token: string): Recovery | null {
+function recoveryPath(wallet?: string): string {
+  if (wallet) {
+    const clean = wallet.toLowerCase().replace(/[^a-z0-9]/g, "");
+    return `${ROOT}/data/recovery-${clean}.json`;
+  }
+  return RECOVERY_PATH;
+}
+
+function readRecovery(token: string, wallet?: string): Recovery | null {
   try {
-    const raw = JSON.parse(fs.readFileSync(RECOVERY_PATH, "utf8")) as Recovery;
+    const p = recoveryPath(wallet);
+    const target = fs.existsSync(p) ? p : RECOVERY_PATH;
+    if (!fs.existsSync(target)) return null;
+    const raw = JSON.parse(fs.readFileSync(target, "utf8")) as Recovery;
     if (!raw.soldHash || !raw.other || raw.token?.toLowerCase() !== token.toLowerCase()) return null;
     return raw;
   } catch {
@@ -105,14 +116,18 @@ function readRecovery(token: string): Recovery | null {
   }
 }
 
-function writeRecovery(value: Recovery) {
-  fs.mkdirSync(`${ROOT}/data`, { recursive: true });
-  fs.writeFileSync(RECOVERY_PATH, JSON.stringify(value));
+function writeRecovery(value: Recovery, wallet?: string) {
+  try {
+    fs.mkdirSync(`${ROOT}/data`, { recursive: true });
+    fs.writeFileSync(recoveryPath(wallet), JSON.stringify(value));
+  } catch {
+    /* ignore write errors */
+  }
 }
 
-function clearRecovery() {
+function clearRecovery(wallet?: string) {
   try {
-    fs.unlinkSync(RECOVERY_PATH);
+    fs.unlinkSync(recoveryPath(wallet));
   } catch {
     /* none */
   }
@@ -357,6 +372,7 @@ async function planSell(
   address: string,
   input: { token: string; symbol: string; decimals: number },
   pool: V4Pool,
+  cycleIndex?: number,
 ): Promise<Plan> {
   const eth = await provider.getBalance(address);
   const need = await roundTripGasWei();
@@ -374,7 +390,7 @@ async function planSell(
     return idle(`Could not price ${input.symbol} in dollars. No swap sent.`, "soon");
   }
   const balanceUsd = Number(ethers.formatUnits(balance, input.decimals)) * mark.usdPerToken;
-  const picked = chooseTradeUsd(balanceUsd, readCycleIndex());
+  const picked = chooseTradeUsd(balanceUsd, cycleIndex ?? readCycleIndex());
   if (!picked.ok) return idle(picked.text, "interval");
 
   let amountIn = unitsForUsd(picked.clip.usd, mark.usdPerToken, input.decimals);
@@ -422,17 +438,18 @@ export async function previewChain(input: {
   symbol: string;
   decimals: number;
   pool: V4Pool | null;
+  cycleIndex?: number;
 }): Promise<{ text: string; pool: V4Pool | null }> {
   const pool = input.pool ?? (await findPool(input.token));
   if (!pool) return { text: `No Robinhood Chain pool found for ${input.symbol}.`, pool: null };
-  const recovery = readRecovery(input.token);
+  const recovery = readRecovery(input.token, input.address);
   if (recovery) {
     return {
       text: `A sell is already open (${recovery.soldHash}). Next step is the buy only. No second sell.`,
       pool,
     };
   }
-  const plan = await planSell(input.address, input, pool);
+  const plan = await planSell(input.address, input, pool, input.cycleIndex);
   return { text: plan.text, pool };
 }
 
@@ -442,18 +459,21 @@ export async function runChainCycle(input: {
   symbol: string;
   decimals: number;
   pool: V4Pool | null;
+  cycleIndex?: number;
+  walletAddress?: string;
+  onBumpCycleIndex?: (next: number) => void;
 }): Promise<CycleResult> {
   const wallet = new ethers.Wallet(input.privateKeyHex.startsWith("0x") ? input.privateKeyHex : `0x${input.privateKeyHex}`, provider);
   const pool = input.pool ?? (await findPool(input.token));
   if (!pool) {
     return skipped(`No Robinhood Chain pool found for ${input.symbol}. No swap sent.`, null, "soon");
   }
-  const recovery = readRecovery(input.token);
-  if (recovery) return buyBack(wallet, input, pool, recovery);
+  const recovery = readRecovery(input.token, wallet.address);
+  if (recovery) return buyBack(wallet, input, pool, recovery, undefined, undefined, undefined, input.onBumpCycleIndex, input.cycleIndex);
 
   let plan: Plan;
   try {
-    plan = await planSell(wallet.address, input, pool);
+    plan = await planSell(wallet.address, input, pool, input.cycleIndex);
   } catch (error) {
     return skipped(`Could not check ${input.symbol}. ${brief(error)}\nNo swap sent.`, pool, "soon");
   }
@@ -473,7 +493,7 @@ export async function runChainCycle(input: {
       soldHash,
       buyAmount: delta > 0n ? delta.toString() : undefined,
       otherBefore: otherBefore.toString(),
-    });
+    }, wallet.address);
     if (delta <= 0n) {
       return {
         text: `Sell ${soldHash} went through and the buy amount is not in yet. It will try the buy again by itself. No second sell.`,
@@ -483,13 +503,13 @@ export async function runChainCycle(input: {
         retry: "soon",
       };
     }
-    return buyBack(wallet, input, pool, readRecovery(input.token) ?? {
+    return buyBack(wallet, input, pool, readRecovery(input.token, wallet.address) ?? {
       token: input.token,
       other: plan.other,
       soldHash,
       buyAmount: delta.toString(),
       otherBefore: otherBefore.toString(),
-    }, plan.amountIn, plan.costPct, plan.usd);
+    }, plan.amountIn, plan.costPct, plan.usd, input.onBumpCycleIndex, input.cycleIndex);
   } catch (error) {
     const detail = brief(error);
     if (soldHash) {
@@ -498,7 +518,7 @@ export async function runChainCycle(input: {
         other: plan.other,
         soldHash,
         otherBefore: otherBefore.toString(),
-      });
+      }, wallet.address);
       return {
         text: `Sell ${soldHash} went through and the buy did not. ${detail}\nIt will try the buy again by itself. No second sell.`,
         pool,
@@ -539,6 +559,8 @@ async function buyBack(
   amountIn?: bigint,
   costPct?: number,
   usd?: number,
+  onBumpCycleIndex?: (next: number) => void,
+  cycleIndex?: number,
 ): Promise<CycleResult> {
   const sellingToken = pool.currency0.toLowerCase() === input.token.toLowerCase();
   const soldHash = recovery.soldHash;
@@ -561,8 +583,12 @@ async function buyBack(
     const buyHash = await sendSwap(wallet, swapInput(pool, !sellingToken, received, (buyOut * 99n) / 100n));
     const after = await balanceOf(input.token, wallet.address);
     const bought = after > before ? after - before : buyOut;
-    clearRecovery();
-    bumpCycleIndex();
+    clearRecovery(wallet.address);
+    if (onBumpCycleIndex && cycleIndex != null) {
+      onBumpCycleIndex(cycleIndex + 1);
+    } else {
+      bumpCycleIndex();
+    }
     const sold = amountIn != null ? ethers.formatUnits(amountIn, input.decimals) : "the open lot";
     const size = usd != null ? `About $${usd.toFixed(2)} sold and bought back.` : "Buy size was recalculated from the tokens the sell actually received.";
     const cost = costPct != null ? `Quoted cost ${costPct.toFixed(2)}% before the buy was recalculated.` : "Buy was priced again from what the sell received.";
