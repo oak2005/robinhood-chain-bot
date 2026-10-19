@@ -11,6 +11,19 @@ import { previewChain, runChainCycle } from "../src/lib/chain/cycle.ts";
 const GATE = "/tmp/trade-gate.json";
 const STATE_URL = "https://raw.githubusercontent.com/oak2005/robinhood-chain-bot/main/data/stillmark-bot.json";
 const NASTY_WALLET = "0xdf246e7a947674476c832544f7867aa864c60bd5";
+
+const MENU = {
+  keyboard: [
+    [{ text: "Status" }, { text: "Balance" }, { text: "Config" }],
+    [{ text: "Help" }, { text: "Resume" }, { text: "Pause" }],
+    [{ text: "Stop" }, { text: "Interval" }, { text: "Token" }],
+    [{ text: "Add token" }, { text: "Add key" }, { text: "Remove key" }],
+    [{ text: "Pay" }],
+  ],
+  resize_keyboard: true,
+  is_persistent: true,
+};
+
 const BUTTONS = {
   Status: "/status",
   Balance: "/balance",
@@ -26,6 +39,7 @@ const BUTTONS = {
   "Remove key": "/removekey",
   Pay: "/pay",
 };
+
 const INTERVALS = ["10m", "20m", "30m", "1h"];
 const INTERVALS_SEC = { "10m": 600, "20m": 1200, "30m": 1800, "1h": 3600 };
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -352,6 +366,71 @@ if (!token.includes(":")) {
 }
 writeGate({ paused: readGate().paused === true, interval: readGate().interval || "" });
 
+function buildTradeInlineMarkup(text, tokenAddress) {
+  const sellMatch = text.match(/Sell\s*\n\s*(0x[0-9a-fA-F]{64})/);
+  const buyMatch = text.match(/Buy\s*\n\s*(0x[0-9a-fA-F]{64})/);
+  const rows = [];
+  const txButtons = [];
+  if (sellMatch) {
+    txButtons.push({ text: "🔍 Sell Tx", url: `https://robinhoodchain.blockscout.com/tx/${sellMatch[1]}` });
+  }
+  if (buyMatch) {
+    txButtons.push({ text: "🔍 Buy Tx", url: `https://robinhoodchain.blockscout.com/tx/${buyMatch[1]}` });
+  }
+  if (txButtons.length > 0) rows.push(txButtons);
+  if (tokenAddress && /^0x[0-9a-fA-F]{40}$/.test(tokenAddress)) {
+    rows.push([{ text: "📊 Token Explorer", url: `https://robinhoodchain.blockscout.com/token/${tokenAddress}` }]);
+  }
+  return rows.length > 0 ? { inline_keyboard: rows } : null;
+}
+
+// Configure Telegram Bot Commands Menu & persistent Menu Button
+async function setupBotMenu() {
+  const commands = [
+    { command: "status", description: "Check bot status and swap clock" },
+    { command: "balance", description: "Check token balance and cycle" },
+    { command: "config", description: "View trading configuration" },
+    { command: "tokeninfo", description: "View token information" },
+    { command: "pause", description: "Pause trading" },
+    { command: "resume", description: "Resume trading" },
+    { command: "stop", description: "Emergency stop trading" },
+    { command: "interval", description: "Set trade interval (10m, 20m, 30m, 1h)" },
+    { command: "addkey", description: "Add wallet private key" },
+    { command: "addtoken", description: "Add token coin address" },
+    { command: "removekey", description: "Remove saved wallet and tokens" },
+    { command: "pay", description: "Pay for access ($20/30 days)" },
+    { command: "help", description: "How to use Inactivity Trade" },
+  ];
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      const cmdRes = await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ commands }),
+      });
+      const cmdData = await cmdRes.json().catch(() => ({}));
+      console.log(`[setupBotMenu] setMyCommands attempt ${attempt}: status ${cmdRes.status}`, cmdData);
+
+      const btnRes = await fetch(`https://api.telegram.org/bot${token}/setChatMenuButton`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ menu_button: { type: "commands" } }),
+      });
+      const btnData = await btnRes.json().catch(() => ({}));
+      console.log(`[setupBotMenu] setChatMenuButton attempt ${attempt}: status ${btnRes.status}`, btnData);
+
+      if (cmdData?.ok && btnData?.ok) {
+        writeGate({ menuReady: true });
+        break;
+      }
+    } catch (err) {
+      console.error(`[setupBotMenu] attempt ${attempt} error:`, err);
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
+setupBotMenu().catch(() => {});
+
 async function ownerStatus() {
   const gate = readGate();
   if (gate.paused) return "Paused. No new swap will start.";
@@ -386,44 +465,104 @@ async function ownerStatus() {
 
 function helpText() {
   return [
-    "Everything stays in this chat.",
-    "Add key, then send a fresh wallet private key in the next message.",
-    "Add token, then send the coin address.",
-    "Each account can keep 3 tokens.",
-    "Do not use the wallet that is already trading.",
-    "The key is sealed. It is not shown back and it is not written into the public files.",
-    "Pay: Send /pay for payment instructions ($20/30 days USDT/USDC on Solana, Base, BNB).",
+    "Inactivity Trade — Commands & Buttons",
+    "",
+    "Status, Balance, Config: Check running status, balance, and next cycle.",
+    "Pause, Resume, Stop: Control swap execution.",
+    "Interval: Choose between 10m, 20m, 30m, or 1h.",
+    "Add key: Store your fresh wallet private key (AES-256 sealed).",
+    "Add token: Add a coin contract address (up to 3 tokens).",
+    "Remove key: Clear your saved wallets and tokens.",
+    "Pay: Access is at least $20/30 days USDT or USDC on Solana, Base, or BNB.",
+    "",
+    "Everything stays in this chat. Tap buttons below or use the Menu button at the bottom left.",
   ].join("\n");
+}
+
+async function intervalReply(userId, isAdmin, arg) {
+  if (!arg) {
+    const current = isAdmin ? (readGate().interval || "30m") : ((await getMemberSettings(userId)).interval || "30m");
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: "10 minutes", callback_data: "interval:10m" },
+          { text: "20 minutes", callback_data: "interval:20m" },
+        ],
+        [
+          { text: "30 minutes", callback_data: "interval:30m" },
+          { text: "1 hour", callback_data: "interval:1h" },
+        ],
+      ],
+    };
+    return {
+      text: `Current interval is ${current}.\nTap a button below or send /interval 10m, 20m, 30m, or 1h:`,
+      reply_markup: keyboard,
+    };
+  }
+  if (!INTERVALS.includes(arg)) {
+    return { text: "Send /interval 10m, 20m, 30m, or 1h." };
+  }
+  if (isAdmin) {
+    writeGate({ interval: arg });
+    return { text: `Interval set to ${arg}.` };
+  } else {
+    await updateMemberSettings(userId, { interval: arg });
+    return { text: `Interval set to ${arg}.` };
+  }
 }
 
 async function ownerReply(cmd, arg) {
   if (cmd === "/pause" || cmd === "/emergency_stop" || cmd === "/stop") {
     writeGate({ paused: true });
-    return "Paused. No new swap will start.";
+    return { text: "Paused. No new swap will start." };
   }
   if (cmd === "/resume") {
     writeGate({ paused: false });
-    return "Running again. The next check can swap.";
+    return { text: "Running again. The next check can swap." };
   }
   if (cmd === "/interval") {
-    if (!INTERVALS.includes(arg)) return "Send /interval 10m, 20m, 30m, or 1h.";
-    writeGate({ interval: arg });
-    return `Interval set to ${arg}.`;
+    return intervalReply(admin, true, arg);
   }
-  if (cmd === "/pay") return payInfoText(admin);
-  if (cmd === "/status" || cmd === "/balance" || cmd === "/tokeninfo" || cmd === "/config") return ownerStatus();
-  if (cmd === "/help" || cmd === "/start") return `Running on its own.\n${helpText()}`;
-  return helpText();
+  if (cmd === "/pay") return { text: await payInfoText(admin) };
+  if (cmd === "/status" || cmd === "/balance" || cmd === "/tokeninfo" || cmd === "/token" || cmd === "/config") return { text: await ownerStatus() };
+  if (cmd === "/help" || cmd === "/start") return { text: `Running on its own.\n\n${helpText()}` };
+  return { text: helpText() };
 }
 
 async function beginKey(chatId) {
   pending.set(chatId, { step: "chain-key" });
-  return "Which chain? Reply Solana, Stacks, or Robinhood. Use a fresh wallet, not the one already trading.";
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "Solana", callback_data: "chain:solana" },
+        { text: "Stacks", callback_data: "chain:stacks" },
+        { text: "Robinhood", callback_data: "chain:robinhood" },
+      ],
+      [{ text: "Cancel", callback_data: "action:cancel" }],
+    ],
+  };
+  return {
+    text: "Which chain? Tap a button or reply Solana, Stacks, or Robinhood. Use a fresh wallet, not the one already trading.",
+    reply_markup: keyboard,
+  };
 }
 
 async function beginToken(chatId) {
   pending.set(chatId, { step: "chain-token" });
-  return "Which chain is the token on? Reply Solana, Stacks, or Robinhood.";
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "Solana", callback_data: "chain:solana" },
+        { text: "Stacks", callback_data: "chain:stacks" },
+        { text: "Robinhood", callback_data: "chain:robinhood" },
+      ],
+      [{ text: "Cancel", callback_data: "action:cancel" }],
+    ],
+  };
+  return {
+    text: "Which chain is the token on? Tap a button or reply Solana, Stacks, or Robinhood.",
+    reply_markup: keyboard,
+  };
 }
 
 async function removeKeys(userId) {
@@ -436,28 +575,28 @@ async function removeKeys(userId) {
 
 async function takePending(chatId, userId, text) {
   const state = pending.get(chatId);
-  if (!state) return "";
-  if (text === "/cancel") {
+  if (!state) return { text: "" };
+  if (text === "/cancel" || text === "action:cancel") {
     pending.delete(chatId);
-    return "Cancelled.";
+    return { text: "Cancelled." };
   }
   if (state.step === "chain-key" || state.step === "chain-token") {
     const chain = chainOf(text);
-    if (!chain) return "Reply Solana, Stacks, or Robinhood.";
+    if (!chain) return { text: "Reply Solana, Stacks, or Robinhood." };
     state.chain = chain;
     state.step = state.step === "chain-key" ? "key" : "token";
     return state.step === "key"
-      ? "Send the fresh wallet private key in the next message. It will be sealed. Do not send the wallet that is already trading."
-      : "Send the token address.";
+      ? { text: "Send the fresh wallet private key in the next message. It will be sealed. Do not send the wallet that is already trading." }
+      : { text: `Send the ${state.chain} token coin address.` };
   }
   if (state.step === "key") {
     const database = await db();
-    if (!database) return "No vault is connected yet. The key was not stored.";
+    if (!database) return { text: "No vault is connected yet. The key was not stored." };
     let address = "";
     try {
       address = derive(state.chain, text);
     } catch (error) {
-      return error instanceof Error ? error.message : "That key could not be read.";
+      return { text: error instanceof Error ? error.message : "That key could not be read." };
     }
     const wrapped = seal(text.trim());
     await database.query(
@@ -466,56 +605,78 @@ async function takePending(chatId, userId, text) {
       [userId, state.chain, address, wrapped],
     );
     pending.delete(chatId);
-    return `Saved ${state.chain} ${address}. The key is not repeated. Tap Add token for the coin.`;
+    return { text: `Saved ${state.chain} ${address}. The key is not repeated. Tap Add token for the coin.` };
   }
   const database = await db();
-  if (!database) return "No vault is connected yet. The token was not stored.";
+  if (!database) return { text: "No vault is connected yet. The token was not stored." };
   const count = await database.query("select count(*)::int as n from tg_tokens where user_id = $1", [userId]);
-  if ((count.rows[0]?.n ?? 0) >= 3) return "Three tokens are already saved. Tap Remove key before adding another account's set.";
+  if ((count.rows[0]?.n ?? 0) >= 3) return { text: "Three tokens are already saved. Tap Remove key before adding another account's set." };
   const tokenText = text.trim();
-  await database.query("insert into tg_tokens (id, user_id, chain, token, symbol) values ($1, $2, $3, $4, '')", [
+  let symbol = "";
+  if (state.chain === "robinhood" && /^0x[0-9a-fA-F]{40}$/.test(tokenText)) {
+    try {
+      const provider = new ethers.JsonRpcProvider("https://rpc.robinhoodchain.com");
+      const erc20 = new ethers.Contract(tokenText, ["function symbol() view returns (string)"], provider);
+      symbol = await Promise.race([erc20.symbol(), new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000))]);
+    } catch {}
+  }
+  await database.query("insert into tg_tokens (id, user_id, chain, token, symbol) values ($1, $2, $3, $4, $5)", [
     randomUUID(),
     userId,
     state.chain,
     tokenText,
+    symbol || "",
   ]);
   pending.delete(chatId);
-  return `Saved the token on ${state.chain}. This account can hold up to 3.`;
+  const symText = symbol ? ` (${symbol})` : "";
+  return { text: `Saved the token${symText} on ${state.chain}. This account can hold up to 3.` };
 }
 
 async function guestCommand(chatId, userId, cmd, arg) {
   if (cmd === "/pause") {
     await updateMemberSettings(userId, { paused: true });
-    return "Paused your trading. No new swap will start for your account.";
+    return { text: "Paused your trading. No new swap will start for your account." };
   }
   if (cmd === "/resume") {
     const settings = await getMemberSettings(userId);
     const intervalSec = INTERVALS_SEC[settings.interval] || 1800;
     await updateMemberSettings(userId, { paused: false, next_recheck_ms: Date.now() + intervalSec * 1000 });
-    return `Running again. Next swap waits ${settings.interval || "30m"}.`;
+    return { text: `Running again. Next swap waits ${settings.interval || "30m"}.` };
   }
   if (cmd === "/emergency_stop" || cmd === "/stop") {
     await updateMemberSettings(userId, { paused: true });
-    return "Stopped your trading. Tap Resume to turn swaps back on.";
+    return { text: "Stopped your trading. Tap Resume to turn swaps back on." };
   }
   if (cmd === "/interval") {
-    if (!INTERVALS.includes(arg)) return "Send /interval 10m, 20m, 30m, or 1h.";
-    await updateMemberSettings(userId, { interval: arg });
-    return `Interval set to ${arg}.`;
+    return intervalReply(userId, false, arg);
   }
-  if (cmd === "/pay") return payInfoText(userId);
+  if (cmd === "/pay") return { text: await payInfoText(userId) };
   if (cmd === "/addkey") return beginKey(chatId);
   if (cmd === "/addtoken") return beginToken(chatId);
-  if (cmd === "/removekey") return removeKeys(userId);
-  if (cmd === "/balance" || cmd === "/status" || cmd === "/tokeninfo" || cmd === "/config") return savedLines(userId);
-  return helpText();
+  if (cmd === "/removekey") return { text: await removeKeys(userId) };
+  if (cmd === "/balance" || cmd === "/status" || cmd === "/tokeninfo" || cmd === "/token" || cmd === "/config") return { text: await savedLines(userId) };
+  if (cmd === "/start") {
+    return {
+      text: [
+        "Welcome to Inactivity Trade!",
+        "",
+        helpText(),
+      ].join("\n"),
+    };
+  }
+  return { text: helpText() };
 }
 
-async function send(chatId, text) {
+async function send(chatId, text, customMarkup = null) {
+  const body = {
+    chat_id: chatId,
+    text: text.slice(0, 3500),
+    reply_markup: customMarkup ?? MENU,
+  };
   await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text: text.slice(0, 3500) }),
+    body: JSON.stringify(body),
   });
 }
 
@@ -594,7 +755,10 @@ async function checkMemberSwaps() {
 
               if (result.traded) {
                 const chatId = Number(userId);
-                if (chatId) await send(chatId, result.text).catch(() => {});
+                if (chatId) {
+                  const inline = buildTradeInlineMarkup(result.text, item.token);
+                  await send(chatId, result.text, inline).catch(() => {});
+                }
               }
             } catch (tradeErr) {
               const errText = tradeErr instanceof Error ? tradeErr.message : "Swap failed";
@@ -624,7 +788,7 @@ while (true) {
     const response = await fetch(`https://api.telegram.org/bot${token}/getUpdates`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ offset, timeout: 25, allowed_updates: ["message"] }),
+      body: JSON.stringify({ offset, timeout: 25, allowed_updates: ["message", "callback_query"] }),
       signal: AbortSignal.timeout(35000),
     });
     const payload = await response.json();
@@ -634,6 +798,51 @@ while (true) {
     }
     for (const update of payload.result ?? []) {
       if (typeof update.update_id === "number") offset = Math.max(offset, update.update_id + 1);
+
+      // Handle inline button clicks
+      if (update.callback_query) {
+        const cq = update.callback_query;
+        const cqId = cq.id;
+        const chatId = cq.message?.chat?.id;
+        const userId = String(cq.from?.id ?? "");
+        const data = cq.data || "";
+
+        await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ callback_query_id: cqId }),
+        }).catch(() => {});
+
+        if (!chatId || !userId) continue;
+        const isAdmin = admin && userId === admin;
+
+        try {
+          if (data.startsWith("interval:")) {
+            const val = data.replace("interval:", "");
+            const reply = await intervalReply(userId, isAdmin, val);
+            await send(chatId, reply.text, reply.reply_markup);
+            continue;
+          }
+
+          if (data.startsWith("chain:")) {
+            const val = data.replace("chain:", "");
+            const pendingRes = await takePending(chatId, userId, val);
+            await send(chatId, pendingRes.text, pendingRes.reply_markup);
+            continue;
+          }
+
+          if (data === "action:cancel") {
+            pending.delete(chatId);
+            await send(chatId, "Cancelled.");
+            continue;
+          }
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : "Button action failed.";
+          await send(chatId, reason.slice(0, 300));
+        }
+        continue;
+      }
+
       const message = update.message;
       const raw = typeof message?.text === "string" ? message.text.trim() : "";
       const chatId = message?.chat?.id;
@@ -642,9 +851,10 @@ while (true) {
       const waiting = pending.get(chatId);
       const mapped = BUTTONS[raw] ?? raw;
       try {
-        if (waiting && !BUTTONS[raw] && !mapped.startsWith("/status") && mapped !== "/cancel" && !mapped.startsWith("/add") && !mapped.startsWith("/remove") && !mapped.startsWith("/help") && !mapped.startsWith("/start")) {
+        if (waiting && !BUTTONS[raw] && !mapped.startsWith("/status") && mapped !== "/cancel" && !mapped.startsWith("/add") && !mapped.startsWith("/remove") && !mapped.startsWith("/help") && !mapped.startsWith("/start") && !mapped.startsWith("/pay")) {
           if (waiting.step === "key") await hide(chatId, message.message_id);
-          await send(chatId, await takePending(chatId, userId, raw));
+          const pendingRes = await takePending(chatId, userId, raw);
+          await send(chatId, pendingRes.text, pendingRes.reply_markup);
           continue;
         }
         if (mapped === "/cancel") {
@@ -672,13 +882,22 @@ while (true) {
         const cmd = mapped.split(/\s+/)[0]?.split("@")[0] ?? "";
         const arg = mapped.split(/\s+/)[1] ?? "";
         const isAdmin = admin && userId === admin;
-        if (cmd === "/addkey" || cmd === "/addtoken" || cmd === "/removekey") {
-          const reply = cmd === "/addkey" ? await beginKey(chatId) : cmd === "/addtoken" ? await beginToken(chatId) : await removeKeys(userId);
-          await send(chatId, isAdmin ? `${reply}\nThis does not replace the wallet already trading.` : reply);
+
+        if (cmd === "/interval") {
+          const reply = await intervalReply(userId, isAdmin, arg);
+          await send(chatId, reply.text, reply.reply_markup);
           continue;
         }
+
+        if (cmd === "/addkey" || cmd === "/addtoken" || cmd === "/removekey") {
+          const reply = cmd === "/addkey" ? await beginKey(chatId) : cmd === "/addtoken" ? await beginToken(chatId) : { text: await removeKeys(userId) };
+          const text = isAdmin ? `${reply.text}\nThis does not replace the wallet already trading.` : reply.text;
+          await send(chatId, text, reply.reply_markup);
+          continue;
+        }
+
         const reply = isAdmin && cmd !== "/help" && cmd !== "/start" ? await ownerReply(cmd, arg) : isAdmin ? await ownerReply(cmd, arg) : await guestCommand(chatId, userId, cmd, arg);
-        await send(chatId, reply);
+        await send(chatId, reply.text, reply.reply_markup);
       } catch (error) {
         const reason = error instanceof Error ? error.message : "That could not be saved.";
         await send(chatId, reason.slice(0, 300));

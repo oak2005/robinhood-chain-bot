@@ -67,12 +67,70 @@ function unlock() {
   }
 }
 
-async function send(chatId: number, text: string) {
+const MENU = {
+  keyboard: [
+    [{ text: "Status" }, { text: "Balance" }, { text: "Config" }],
+    [{ text: "Help" }, { text: "Resume" }, { text: "Pause" }],
+    [{ text: "Stop" }, { text: "Interval" }, { text: "Token" }],
+    [{ text: "Add token" }, { text: "Add key" }, { text: "Remove key" }],
+    [{ text: "Pay" }],
+  ],
+  resize_keyboard: true,
+  is_persistent: true,
+};
+
+export async function setupBotMenu(token: string) {
+  const commands = [
+    { command: "status", description: "Check bot status and swap clock" },
+    { command: "balance", description: "Check token balance and cycle" },
+    { command: "config", description: "View trading configuration" },
+    { command: "tokeninfo", description: "View token information" },
+    { command: "pause", description: "Pause trading" },
+    { command: "resume", description: "Resume trading" },
+    { command: "stop", description: "Emergency stop trading" },
+    { command: "interval", description: "Set trade interval (10m, 20m, 30m, 1h)" },
+    { command: "addkey", description: "Add wallet private key" },
+    { command: "addtoken", description: "Add token coin address" },
+    { command: "removekey", description: "Remove saved wallet and tokens" },
+    { command: "pay", description: "Pay for access ($20/30 days)" },
+    { command: "help", description: "How to use Inactivity Trade" },
+  ];
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ commands }),
+    });
+    await fetch(`https://api.telegram.org/bot${token}/setChatMenuButton`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ menu_button: { type: "commands" } }),
+    });
+  } catch {}
+}
+
+async function send(chatId: number, text: string, tokenAddress?: string) {
   const token = fs.readFileSync(TOKEN_PATH, "utf8").trim();
+  const sellMatch = text.match(/Sell\s*\n\s*(0x[0-9a-fA-F]{64})/);
+  const buyMatch = text.match(/Buy\s*\n\s*(0x[0-9a-fA-F]{64})/);
+  const rows: Array<Array<{ text: string; url: string }>> = [];
+  const txButtons: Array<{ text: string; url: string }> = [];
+  if (sellMatch) {
+    txButtons.push({ text: "🔍 Sell Tx", url: `https://robinhoodchain.blockscout.com/tx/${sellMatch[1]}` });
+  }
+  if (buyMatch) {
+    txButtons.push({ text: "🔍 Buy Tx", url: `https://robinhoodchain.blockscout.com/tx/${buyMatch[1]}` });
+  }
+  if (txButtons.length > 0) rows.push(txButtons);
+  if (tokenAddress && /^0x[0-9a-fA-F]{40}$/.test(tokenAddress)) {
+    rows.push([{ text: "📊 Token Explorer", url: `https://robinhoodchain.blockscout.com/token/${tokenAddress}` }]);
+  }
+  const replyMarkup = rows.length > 0 ? { inline_keyboard: rows } : MENU;
+
   const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text: text.slice(0, 3500) }),
+    body: JSON.stringify({ chat_id: chatId, text: text.slice(0, 3500), reply_markup: replyMarkup }),
   });
   if (!response.ok) throw new Error(`Telegram HTTP ${response.status}`);
 }
@@ -91,6 +149,10 @@ export async function runDueTrade(wait = false): Promise<string> {
   }
   if (!locked) return "";
   try {
+    try {
+      const botToken = fs.readFileSync(TOKEN_PATH, "utf8").trim();
+      if (botToken) await setupBotMenu(botToken);
+    } catch {}
     const state = JSON.parse(fs.readFileSync(STATE_PATH, "utf8")) as SavedState;
     const now = Date.now();
     if (state.halted || state.paused || state.active === false) return state.halted || state.paused ? "paused" : "";
@@ -145,7 +207,7 @@ export async function runDueTrade(wait = false): Promise<string> {
     if (!repeat) {
       try {
         const admin = fs.readFileSync(ADMIN_PATH, "utf8").trim();
-        if (admin) await send(Number(admin), text);
+        if (admin) await send(Number(admin), text, state.token?.address);
       } catch {
         /* chat can miss a note; the next window still runs */
       }

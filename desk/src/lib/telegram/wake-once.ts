@@ -17,6 +17,19 @@ const BUTTONS: Record<string, string> = {
   "Add token": "/addtoken",
   "Add key": "/addkey",
   "Remove key": "/removekey",
+  Pay: "/pay",
+};
+
+const MENU = {
+  keyboard: [
+    [{ text: "Status" }, { text: "Balance" }, { text: "Config" }],
+    [{ text: "Help" }, { text: "Resume" }, { text: "Pause" }],
+    [{ text: "Stop" }, { text: "Interval" }, { text: "Token" }],
+    [{ text: "Add token" }, { text: "Add key" }, { text: "Remove key" }],
+    [{ text: "Pay" }],
+  ],
+  resize_keyboard: true,
+  is_persistent: true,
 };
 
 const INTERVALS: Record<string, number> = { "10m": 600, "20m": 1200, "30m": 1800, "1h": 3600 };
@@ -62,6 +75,36 @@ async function liveLine(state: BotState, address: string): Promise<string> {
   }
 }
 
+export async function setupBotMenu(token: string) {
+  const commands = [
+    { command: "status", description: "Check bot status and swap clock" },
+    { command: "balance", description: "Check token balance and cycle" },
+    { command: "config", description: "View trading configuration" },
+    { command: "tokeninfo", description: "View token information" },
+    { command: "pause", description: "Pause trading" },
+    { command: "resume", description: "Resume trading" },
+    { command: "stop", description: "Emergency stop trading" },
+    { command: "interval", description: "Set trade interval (10m, 20m, 30m, 1h)" },
+    { command: "addkey", description: "Add wallet private key" },
+    { command: "addtoken", description: "Add token coin address" },
+    { command: "removekey", description: "Remove saved wallet and tokens" },
+    { command: "pay", description: "Pay for access ($20/30 days)" },
+    { command: "help", description: "How to use Inactivity Trade" },
+  ];
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ commands }),
+    });
+    await fetch(`https://api.telegram.org/bot${token}/setChatMenuButton`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ menu_button: { type: "commands" } }),
+    });
+  } catch {}
+}
+
 async function drainCommands() {
   let token = "";
   let admin = "";
@@ -71,6 +114,7 @@ async function drainCommands() {
   } catch {
     return;
   }
+  await setupBotMenu(token);
   let address = "";
   try {
     const creds = JSON.parse(fs.readFileSync(`${ROOT}/.secrets/robinhood_creds.json`, "utf8")) as { address?: string };
@@ -115,7 +159,7 @@ async function drainCommands() {
         const sent = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ chat_id: chatId, text: reply }),
+          body: JSON.stringify({ chat_id: chatId, text: reply, reply_markup: MENU }),
         });
         process.stdout.write(`answered guest ${cmd} ${sent.ok ? "ok" : "fail"}\n`);
         continue;
@@ -189,7 +233,7 @@ async function drainCommands() {
       const sent = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, text: reply.slice(0, 3500) }),
+        body: JSON.stringify({ chat_id: chatId, text: reply.slice(0, 3500), reply_markup: MENU }),
       });
       process.stdout.write(`answered ${cmd} ${sent.ok ? "ok" : "fail"}\n`);
     } catch (error) {
@@ -202,13 +246,16 @@ async function drainCommands() {
 }
 
 function guestReply(cmd: string): string {
+  if (cmd === "/pay") {
+    return "Access is at least $20 USD per 30 days in USDT or USDC on Solana, Base, or BNB. Tap Pay or send /pay on Railway.";
+  }
   if (cmd === "/pause" || cmd === "/resume" || cmd === "/stop" || cmd === "/emergency_stop" || cmd === "/interval") {
     return "This account cannot pause or stop the running swaps.";
   }
   if (cmd === "/addkey" || cmd === "/addtoken" || cmd === "/removekey") {
     return "Tap Add key. The next message should be a fresh wallet private key, not the wallet already trading. Then tap Add token.";
   }
-  if (cmd === "/balance" || cmd === "/status" || cmd === "/tokeninfo" || cmd === "/config") {
+  if (cmd === "/balance" || cmd === "/status" || cmd === "/tokeninfo" || cmd === "/token" || cmd === "/config") {
     return "No wallet is saved for this Telegram account yet. Tap Add key.";
   }
   return [
@@ -219,6 +266,11 @@ function guestReply(cmd: string): string {
     "Do not use the wallet that is already running.",
   ].join("\n");
 }
+
+try {
+  const secretToken = fs.readFileSync(`${ROOT}/.secrets/telegram_bot_token`, "utf8").trim();
+  if (secretToken) await setupBotMenu(secretToken);
+} catch {}
 
 await (process.env.STILLMARK_SKIP_DRAIN === "1" ? Promise.resolve() : drainCommands().catch(() => undefined));
 const line = await runDueTrade(true);
