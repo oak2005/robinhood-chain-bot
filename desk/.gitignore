@@ -3,4 +3,5 @@ node_modules
 .data
 dist
 .output
+.vercel
 *.log

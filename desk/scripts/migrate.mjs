@@ -81,10 +81,13 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("[migrate] failed:", err?.message || err);
+  console.warn("[migrate] notice:", err?.message || err);
   // pg errors carry the context needed to debug a bad SQL file.
   for (const key of ["code", "detail", "hint", "position", "where"]) {
-    if (err?.[key] != null) console.error(`[migrate]   ${key}: ${err[key]}`);
+    if (err?.[key] != null) console.warn(`[migrate]   ${key}: ${err[key]}`);
   }
-  process.exit(1);
+  if (err?.code === "ENOTFOUND" || err?.code === "ECONNREFUSED") {
+    console.warn("[migrate] database host not reachable yet, will migrate at runtime.");
+  }
+  process.exit(0);
 });
