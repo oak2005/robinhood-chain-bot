@@ -207,7 +207,8 @@ export async function runDueTrade(wait = false): Promise<string> {
     if (!repeat) {
       try {
         const admin = fs.readFileSync(ADMIN_PATH, "utf8").trim();
-        if (admin) await send(Number(admin), text, state.token?.address);
+        const notificationText = traded ? text : `⚠️ ${state.token?.symbol || "Token"} cycle swap failed on Robinhood Chain.\n${text}`;
+        if (admin) await send(Number(admin), notificationText, state.token?.address);
       } catch {
         /* chat can miss a note; the next window still runs */
       }

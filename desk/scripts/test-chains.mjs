@@ -1,5 +1,5 @@
 import { readSolanaWalletBalances, readStacksWalletBalances, fetchTokenPriceUsd } from "../src/lib/chain/balance-reader.ts";
-import { previewSolana, runSolanaCycle, getJupiterOrder } from "../src/lib/chain/solana-cycle.ts";
+import { previewSolana, runSolanaCycle, getJupiterQuote } from "../src/lib/chain/solana-cycle.ts";
 import { previewStacks, runStacksCycle } from "../src/lib/chain/stacks-cycle.ts";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
@@ -16,19 +16,19 @@ async function main() {
   console.log("Solana Deposit Wallet Balance:", JSON.stringify(solBal, null, 2));
 
   // 2. Test Jupiter Quote on Solana
-  console.log("\n2. Testing Jupiter API v2 Order Quote on Solana...");
-  const jupOrder = await getJupiterOrder(
+  console.log("\n2. Testing Jupiter API v1 Quote on Solana...");
+  const jupQuote = await getJupiterQuote(
     "So11111111111111111111111111111111111111112",
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
     10_000_000n, // 0.01 SOL
-    solDepositAddr,
+    250,
   );
   console.log("Jupiter quote result:", {
-    ok: jupOrder.ok,
-    inUsdValue: jupOrder.inUsdValue,
-    outUsdValue: jupOrder.outUsdValue,
-    priceImpact: jupOrder.priceImpact,
-    errorMessage: jupOrder.errorMessage,
+    ok: jupQuote.ok,
+    inAmount: jupQuote.inAmount,
+    outAmount: jupQuote.outAmount,
+    priceImpactPct: jupQuote.priceImpactPct,
+    error: jupQuote.error,
   });
 
   // 3. Test Solana Preview

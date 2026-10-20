@@ -821,20 +821,35 @@ if (!token.includes(":")) {
 }
 writeGate({ paused: readGate().paused === true, interval: readGate().interval || "" });
 
-function buildTradeInlineMarkup(text, tokenAddress) {
-  const sellMatch = text.match(/Sell\s*\n\s*(0x[0-9a-fA-F]{64})/);
-  const buyMatch = text.match(/Buy\s*\n\s*(0x[0-9a-fA-F]{64})/);
+function buildTradeInlineMarkup(text, tokenAddress, chain = "robinhood") {
+  const sellMatch = (text || "").match(/Sell\s*\n\s*([0-9a-zA-Z]{40,90})/);
+  const buyMatch = (text || "").match(/Buy\s*\n\s*([0-9a-zA-Z]{40,90})/);
   const rows = [];
   const txButtons = [];
+
+  const getTxUrl = (hash) => {
+    const clean = hash.trim();
+    if (chain === "solana") return `https://solscan.io/tx/${clean}`;
+    if (chain === "stacks") return `https://explorer.hiro.so/txid/${clean.startsWith("0x") ? clean : "0x" + clean}?chain=mainnet`;
+    return `https://robinhoodchain.blockscout.com/tx/${clean.startsWith("0x") ? clean : "0x" + clean}`;
+  };
+
+  const getTokenUrl = (addr) => {
+    const clean = addr.trim();
+    if (chain === "solana") return `https://solscan.io/token/${clean}`;
+    if (chain === "stacks") return `https://explorer.hiro.so/token/${clean}?chain=mainnet`;
+    return `https://robinhoodchain.blockscout.com/token/${clean}`;
+  };
+
   if (sellMatch) {
-    txButtons.push({ text: "🔍 Sell Tx", url: `https://robinhoodchain.blockscout.com/tx/${sellMatch[1]}` });
+    txButtons.push({ text: "🔍 Sell Tx", url: getTxUrl(sellMatch[1]) });
   }
   if (buyMatch) {
-    txButtons.push({ text: "🔍 Buy Tx", url: `https://robinhoodchain.blockscout.com/tx/${buyMatch[1]}` });
+    txButtons.push({ text: "🔍 Buy Tx", url: getTxUrl(buyMatch[1]) });
   }
   if (txButtons.length > 0) rows.push(txButtons);
-  if (tokenAddress && /^0x[0-9a-fA-F]{40}$/.test(tokenAddress)) {
-    rows.push([{ text: "📊 Token Explorer", url: `https://robinhoodchain.blockscout.com/token/${tokenAddress}` }]);
+  if (tokenAddress) {
+    rows.push([{ text: "📊 Token Explorer", url: getTokenUrl(tokenAddress) }]);
   }
   return rows.length > 0 ? { inline_keyboard: rows } : null;
 }
@@ -1257,8 +1272,23 @@ async function checkMemberSwaps() {
               if (result.traded) {
                 const chatId = Number(userId);
                 if (chatId) {
-                  const inline = buildTradeInlineMarkup(result.text, item.token);
+                  const inline = buildTradeInlineMarkup(result.text, item.token, "robinhood");
                   await send(chatId, result.text, inline).catch(() => {});
+                }
+              } else {
+                const chatId = Number(userId);
+                if (chatId) {
+                  const mins = Math.max(1, Math.ceil(intervalSec / 60));
+                  const failMsg = [
+                    `⚠️ ${item.symbol || "Token"} cycle swap failed on Robinhood Chain.`,
+                    result.text || "Swap could not be completed.",
+                    `Next retry in about ${mins} min.`,
+                  ].join("\n");
+                  const isRepeat = settings.last_trade_text === result.text && (now - Number(settings.last_trade_ms || 0) < 15 * 60 * 1000);
+                  if (!isRepeat) {
+                    const inline = buildTradeInlineMarkup("", item.token, "robinhood");
+                    await send(chatId, failMsg, inline).catch(() => {});
+                  }
                 }
               }
             } catch (tradeErr) {
@@ -1267,6 +1297,20 @@ async function checkMemberSwaps() {
                 next_recheck_ms: nextRecheck,
                 last_trade_text: errText,
               });
+              const chatId = Number(userId);
+              if (chatId) {
+                const mins = Math.max(1, Math.ceil(intervalSec / 60));
+                const failMsg = [
+                  `⚠️ ${item.symbol || "Token"} cycle swap failed on Robinhood Chain.`,
+                  errText,
+                  `Next retry in about ${mins} min.`,
+                ].join("\n");
+                const isRepeat = settings.last_trade_text === errText && (now - Number(settings.last_trade_ms || 0) < 15 * 60 * 1000);
+                if (!isRepeat) {
+                  const inline = buildTradeInlineMarkup("", item.token, "robinhood");
+                  await send(chatId, failMsg, inline).catch(() => {});
+                }
+              }
             }
           }
 
@@ -1300,7 +1344,23 @@ async function checkMemberSwaps() {
               if (result.traded) {
                 const chatId = Number(userId);
                 if (chatId) {
-                  await send(chatId, result.text).catch(() => {});
+                  const inline = buildTradeInlineMarkup(result.text, item.token, "solana");
+                  await send(chatId, result.text, inline).catch(() => {});
+                }
+              } else {
+                const chatId = Number(userId);
+                if (chatId) {
+                  const mins = Math.max(1, Math.ceil(intervalSec / 60));
+                  const failMsg = [
+                    `⚠️ ${item.symbol || "Token"} cycle swap failed on Solana.`,
+                    result.text || "Swap could not be completed.",
+                    `Next retry in about ${mins} min.`,
+                  ].join("\n");
+                  const isRepeat = settings.last_trade_text === result.text && (now - Number(settings.last_trade_ms || 0) < 15 * 60 * 1000);
+                  if (!isRepeat) {
+                    const inline = buildTradeInlineMarkup("", item.token, "solana");
+                    await send(chatId, failMsg, inline).catch(() => {});
+                  }
                 }
               }
             } catch (tradeErr) {
@@ -1309,6 +1369,20 @@ async function checkMemberSwaps() {
                 next_recheck_ms: nextRecheck,
                 last_trade_text: errText,
               });
+              const chatId = Number(userId);
+              if (chatId) {
+                const mins = Math.max(1, Math.ceil(intervalSec / 60));
+                const failMsg = [
+                  `⚠️ ${item.symbol || "Token"} cycle swap failed on Solana.`,
+                  errText,
+                  `Next retry in about ${mins} min.`,
+                ].join("\n");
+                const isRepeat = settings.last_trade_text === errText && (now - Number(settings.last_trade_ms || 0) < 15 * 60 * 1000);
+                if (!isRepeat) {
+                  const inline = buildTradeInlineMarkup("", item.token, "solana");
+                  await send(chatId, failMsg, inline).catch(() => {});
+                }
+              }
             }
           }
 
@@ -1342,7 +1416,23 @@ async function checkMemberSwaps() {
               if (result.traded) {
                 const chatId = Number(userId);
                 if (chatId) {
-                  await send(chatId, result.text).catch(() => {});
+                  const inline = buildTradeInlineMarkup(result.text, item.token, "stacks");
+                  await send(chatId, result.text, inline).catch(() => {});
+                }
+              } else {
+                const chatId = Number(userId);
+                if (chatId) {
+                  const mins = Math.max(1, Math.ceil(intervalSec / 60));
+                  const failMsg = [
+                    `⚠️ ${item.symbol || "Token"} cycle swap failed on Stacks.`,
+                    result.text || "Swap could not be completed.",
+                    `Next retry in about ${mins} min.`,
+                  ].join("\n");
+                  const isRepeat = settings.last_trade_text === result.text && (now - Number(settings.last_trade_ms || 0) < 15 * 60 * 1000);
+                  if (!isRepeat) {
+                    const inline = buildTradeInlineMarkup("", item.token, "stacks");
+                    await send(chatId, failMsg, inline).catch(() => {});
+                  }
                 }
               }
             } catch (tradeErr) {
@@ -1351,6 +1441,20 @@ async function checkMemberSwaps() {
                 next_recheck_ms: nextRecheck,
                 last_trade_text: errText,
               });
+              const chatId = Number(userId);
+              if (chatId) {
+                const mins = Math.max(1, Math.ceil(intervalSec / 60));
+                const failMsg = [
+                  `⚠️ ${item.symbol || "Token"} cycle swap failed on Stacks.`,
+                  errText,
+                  `Next retry in about ${mins} min.`,
+                ].join("\n");
+                const isRepeat = settings.last_trade_text === errText && (now - Number(settings.last_trade_ms || 0) < 15 * 60 * 1000);
+                if (!isRepeat) {
+                  const inline = buildTradeInlineMarkup("", item.token, "stacks");
+                  await send(chatId, failMsg, inline).catch(() => {});
+                }
+              }
             }
           }
         }

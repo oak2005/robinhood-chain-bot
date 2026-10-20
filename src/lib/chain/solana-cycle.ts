@@ -1,12 +1,16 @@
+import fs from "node:fs";
 import bs58 from "bs58";
 import nacl from "tweetnacl";
 import { Keypair, VersionedTransaction, Connection, PublicKey } from "@solana/web3.js";
+import { ethers } from "ethers";
 import { chooseTradeUsd, describeClip } from "./size.ts";
 import { readSolanaWalletBalances, fetchTokenPriceUsd } from "./balance-reader.ts";
 
+const ROOT = process.env.STILLMARK_ROOT || "/workspace";
 const SOLANA_RPC = process.env.SOLANA_RPC_URL || "https://api.mainnet.solana.com";
 const WSOL_MINT = "So11111111111111111111111111111111111111112";
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const MAX_LOSS_BPS = 800; // 8.0% flexible spread protection for Solana DEXes
 
 export interface SolanaCycleResult {
   text: string;
@@ -14,6 +18,45 @@ export interface SolanaCycleResult {
   halt?: boolean;
   retry: "soon" | "interval";
   txHash?: string;
+}
+
+interface SolanaRecovery {
+  token: string;
+  symbol: string;
+  solAmount: string;
+  sellTxHash: string;
+  inUnits: string;
+  at: number;
+}
+
+function recoveryPath(walletAddr: string): string {
+  const clean = walletAddr.replace(/[^a-zA-Z0-9]/g, "");
+  return `${ROOT}/data/recovery-solana-${clean}.json`;
+}
+
+function readRecovery(walletAddr: string, token: string): SolanaRecovery | null {
+  try {
+    const p = recoveryPath(walletAddr);
+    if (!fs.existsSync(p)) return null;
+    const raw = JSON.parse(fs.readFileSync(p, "utf8")) as SolanaRecovery;
+    if (!raw.sellTxHash || raw.token !== token) return null;
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+function writeRecovery(walletAddr: string, value: SolanaRecovery) {
+  try {
+    fs.mkdirSync(`${ROOT}/data`, { recursive: true });
+    fs.writeFileSync(recoveryPath(walletAddr), JSON.stringify(value));
+  } catch {}
+}
+
+function clearRecovery(walletAddr: string) {
+  try {
+    fs.unlinkSync(recoveryPath(walletAddr));
+  } catch {}
 }
 
 export function decodeSolanaSecret(secret: string): Uint8Array {
@@ -41,97 +84,131 @@ export async function keypairFromSecret(secret: string): Promise<Keypair> {
   return await Keypair.fromSecretKey(bytes);
 }
 
-export async function getJupiterOrder(
+export async function getJupiterQuote(
   inputMint: string,
   outputMint: string,
   amount: bigint | string,
-  taker: string,
-  slippageBps = 100,
+  slippageBps = 250,
 ): Promise<{
   ok: boolean;
-  transaction?: string;
-  requestId?: string;
-  inUsdValue?: number;
-  outUsdValue?: number;
-  priceImpact?: number;
+  inAmount?: string;
   outAmount?: string;
-  errorMessage?: string;
+  priceImpactPct?: string;
+  quoteResponse?: Record<string, unknown>;
+  error?: string;
 }> {
   try {
-    const url = new URL("https://api.jup.ag/swap/v2/order");
+    const url = new URL("https://api.jup.ag/swap/v1/quote");
     url.searchParams.set("inputMint", inputMint);
     url.searchParams.set("outputMint", outputMint);
     url.searchParams.set("amount", amount.toString());
-    url.searchParams.set("taker", taker);
     url.searchParams.set("slippageBps", slippageBps.toString());
-    // Lowest network fees at swap time: exact dynamic compute units + lowest priority fee
-    url.searchParams.set("dynamicComputeUnitLimit", "true");
-    url.searchParams.set("prioritizationFeeLamports", "auto");
-    url.searchParams.set("priorityLevel", "min");
 
     const res = await fetch(url.toString(), {
       headers: { "content-type": "application/json" },
-      signal: AbortSignal.timeout(12000),
+      signal: AbortSignal.timeout(10000),
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.error || data.errorMessage) {
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!res.ok || data.error || !data.outAmount) {
       return {
         ok: false,
-        errorMessage: data.errorMessage || data.error || `Jupiter returned status ${res.status}`,
+        error: (data.error as string) || (data.message as string) || `Jupiter quote failed (${res.status})`,
       };
     }
     return {
       ok: true,
-      transaction: data.transaction,
-      requestId: data.requestId,
-      inUsdValue: data.inUsdValue,
-      outUsdValue: data.outUsdValue,
-      priceImpact: data.priceImpact,
-      outAmount: data.outAmount,
+      inAmount: data.inAmount as string,
+      outAmount: data.outAmount as string,
+      priceImpactPct: (data.priceImpactPct as string) || "0",
+      quoteResponse: data,
     };
   } catch (err) {
     return {
       ok: false,
-      errorMessage: err instanceof Error ? err.message : "Jupiter API request failed",
+      error: err instanceof Error ? err.message : "Jupiter quote network error",
     };
   }
 }
 
-export async function executeJupiterSwap(
-  signedTxBase64: string,
-  requestId?: string,
-): Promise<{ ok: boolean; txHash?: string; error?: string }> {
+export async function buildJupiterSwapTx(
+  quoteResponse: Record<string, unknown>,
+  userPublicKey: string,
+): Promise<{
+  ok: boolean;
+  swapTransaction?: string;
+  lastValidBlockHeight?: number;
+  error?: string;
+}> {
   try {
-    const res = await fetch("https://api.jup.ag/swap/v2/execute", {
+    const res = await fetch("https://api.jup.ag/swap/v1/swap", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        signedTransaction: signedTxBase64,
-        requestId: requestId || "",
+        quoteResponse,
+        userPublicKey,
+        wrapAndUnwrapSol: true,
+        dynamicComputeUnitLimit: true,
+        prioritizationFeeLamports: "auto",
       }),
-      signal: AbortSignal.timeout(20000),
+      signal: AbortSignal.timeout(12000),
     });
-    const data = await res.json().catch(() => ({}));
-    if (data.signature || data.txid) {
-      return { ok: true, txHash: data.signature || data.txid };
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!res.ok || !data.swapTransaction) {
+      return {
+        ok: false,
+        error: (data.error as string) || (data.message as string) || `Swap build failed (${res.status})`,
+      };
     }
-    if (data.error || data.errorMessage) {
-      return { ok: false, error: data.errorMessage || data.error };
-    }
-  } catch {}
-
-  // Fallback: Broadcast via Solana RPC directly
-  try {
-    const conn = new Connection(SOLANA_RPC, "confirmed");
-    const rawBytes = Buffer.from(signedTxBase64, "base64");
-    const txHash = await conn.sendRawTransaction(rawBytes, {
-      skipPreflight: true,
-      maxRetries: 3,
-    });
-    return { ok: true, txHash };
+    return {
+      ok: true,
+      swapTransaction: data.swapTransaction as string,
+      lastValidBlockHeight: typeof data.lastValidBlockHeight === "number" ? data.lastValidBlockHeight : undefined,
+    };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : "Broadcast failed" };
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Jupiter swap build error",
+    };
   }
+}
+
+async function broadcastAndConfirmTx(
+  conn: Connection,
+  signedVtxBytes: Uint8Array,
+  timeoutMs = 25000,
+): Promise<string> {
+  const txHash = await conn.sendRawTransaction(signedVtxBytes, {
+    skipPreflight: true,
+    maxRetries: 3n,
+  });
+
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    await new Promise((r) => setTimeout(r, 1500));
+    try {
+      const statusRes = await conn.getSignatureStatus(txHash, { searchTransactionHistory: true });
+      const status = statusRes?.value;
+      if (status) {
+        if (status.err) {
+          throw new Error(`Transaction reverted: ${JSON.stringify(status.err)}`);
+        }
+        if (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized") {
+          return txHash;
+        }
+      }
+    } catch (checkErr) {
+      if (checkErr instanceof Error && checkErr.message.includes("Transaction reverted")) {
+        throw checkErr;
+      }
+    }
+  }
+
+  // If timeout expired but tx was broadcast, check one last time
+  const finalStatus = await conn.getSignatureStatus(txHash, { searchTransactionHistory: true }).catch(() => null);
+  if (finalStatus?.value?.err) {
+    throw new Error(`Transaction reverted: ${JSON.stringify(finalStatus.value.err)}`);
+  }
+  return txHash;
 }
 
 export async function previewSolana(input: {
@@ -148,11 +225,12 @@ export async function previewSolana(input: {
     const solAmount = parseFloat(balInfo.nativeAmount) || 0;
     const tokenBal = balInfo.tokens[0];
     const tokenAmount = parseFloat(tokenBal?.amount || "0");
-    const tokenPrice = tokenBal?.priceUsd || (await fetchTokenPriceUsd(input.token));
-    const tokenUsd = tokenBal?.balanceUsd != null ? tokenBal.balanceUsd : tokenPrice ? tokenAmount * tokenPrice : 0;
+    const tokenPrice = tokenBal?.priceUsd || (await fetchTokenPriceUsd(input.token)) || 0;
+    const tokenUsd = tokenBal?.balanceUsd != null ? tokenBal.balanceUsd : tokenAmount * tokenPrice;
 
+    const shortAddr = input.token.length > 8 ? `${input.token.slice(0, 4)}…${input.token.slice(-4)}` : input.token;
     const lines: string[] = [
-      `Solana: ${input.symbol} (${input.token.slice(0, 4)}…${input.token.slice(-4)})`,
+      `Solana: ${input.symbol} (${shortAddr})`,
       `SOL Balance: ${balInfo.nativeAmount} SOL${balInfo.nativeBalanceUsd ? ` ($${balInfo.nativeBalanceUsd.toFixed(2)})` : ""}`,
       `${input.symbol} Balance: ${tokenAmount.toLocaleString("en-US", { maximumFractionDigits: 6 })} ($${tokenUsd.toFixed(2)})`,
     ];
@@ -169,17 +247,26 @@ export async function previewSolana(input: {
 
     lines.push(describeClip(picked.clip));
 
-    // Try quoting Jupiter order
+    // Try quoting round trip via Jupiter v1
     const tokenDecimals = tokenBal?.decimals ?? input.decimals ?? 6;
     const rawUnits = BigInt(Math.max(1, Math.floor((picked.clip.usd / (tokenPrice || 1)) * 10 ** tokenDecimals)));
-    const jup = await getJupiterOrder(input.token, WSOL_MINT, rawUnits, input.address, 100);
+    const sQuote = await getJupiterQuote(input.token, WSOL_MINT, rawUnits, 250);
 
-    if (jup.ok) {
-      lines.push(
-        `Jupiter route ready: $${picked.clip.usd.toFixed(2)} round trip. Impact: ${(jup.priceImpact ?? 0).toFixed(2)}%`,
-      );
+    if (sQuote.ok && sQuote.outAmount) {
+      const bQuote = await getJupiterQuote(WSOL_MINT, input.token, sQuote.outAmount, 250);
+      if (bQuote.ok && bQuote.outAmount) {
+        const inUnits = BigInt(sQuote.inAmount || rawUnits.toString());
+        const backUnits = BigInt(bQuote.outAmount);
+        const lossBps = inUnits > backUnits ? Number(((inUnits - backUnits) * 10000n) / inUnits) : 0;
+        const costPct = Math.max(0, lossBps / 100);
+        lines.push(
+          `Best rate ${costPct.toFixed(2)}% round trip (spread/slippage/impact ${costPct.toFixed(2)}%). Gas is the network price, not a boosted tip.`,
+        );
+      } else {
+        lines.push(`Jupiter route ready: $${picked.clip.usd.toFixed(2)} planned cycle.`);
+      }
     } else {
-      lines.push(`Jupiter route note: ${jup.errorMessage || "Order preparation in progress"}`);
+      lines.push(`Jupiter route note: ${sQuote.error || "Order route check in progress"}`);
     }
 
     return { text: lines.join("\n") };
@@ -212,13 +299,56 @@ export async function runSolanaCycle(input: {
   }
 
   const walletAddr = input.walletAddress || (keypair.address ? keypair.address.toString() : keypair.publicKey?.toBase58());
+  const conn = new Connection(SOLANA_RPC, "confirmed");
 
-  // Check balances
+  // Check for open recovery from a previous interrupted buyback
+  const recovery = readRecovery(walletAddr, input.token);
+  if (recovery && recovery.solAmount && recovery.sellTxHash) {
+    try {
+      const buyQuote = await getJupiterQuote(WSOL_MINT, input.token, recovery.solAmount, 300);
+      if (buyQuote.ok && buyQuote.quoteResponse) {
+        const buyTxBuild = await buildJupiterSwapTx(buyQuote.quoteResponse, walletAddr);
+        if (buyTxBuild.ok && buyTxBuild.swapTransaction) {
+          const buyVtx = VersionedTransaction.deserialize(Buffer.from(buyTxBuild.swapTransaction, "base64"));
+          await buyVtx.sign([keypair]);
+          const buyTxHash = await broadcastAndConfirmTx(conn, buyVtx.serialize());
+          clearRecovery(walletAddr);
+
+          if (input.onBumpCycleIndex) {
+            await input.onBumpCycleIndex((input.cycleIndex ?? 0) + 1);
+          }
+
+          return {
+            text: [
+              `${input.symbol} round trip sent on Solana (recovered buy).`,
+              `Completed buyback after sell ${recovery.sellTxHash}.`,
+              `Sell`,
+              recovery.sellTxHash,
+              `Buy`,
+              buyTxHash,
+            ].join("\n"),
+            traded: true,
+            retry: "interval",
+            txHash: buyTxHash,
+          };
+        }
+      }
+    } catch (recErr) {
+      return {
+        text: `A sell is already open (${recovery.sellTxHash}). Buy retry failed: ${recErr instanceof Error ? recErr.message : "Error"}.\nWill try the buy again. No second sell.`,
+        traded: false,
+        halt: true,
+        retry: "soon",
+      };
+    }
+  }
+
+  // 1. Check wallet balances
   const balInfo = await readSolanaWalletBalances(walletAddr, [{ token: input.token, symbol: input.symbol }]);
   const solAmount = parseFloat(balInfo.nativeAmount) || 0;
   if (solAmount < 0.003) {
     return {
-      text: `Not enough SOL for gas fee (${solAmount.toFixed(4)} SOL). Need at least 0.005 SOL to execute swaps on Solana.`,
+      text: `Not enough SOL for transaction fees (${solAmount.toFixed(4)} SOL). Need at least 0.005 SOL to execute swaps on Solana.`,
       traded: false,
       retry: "interval",
     };
@@ -226,6 +356,7 @@ export async function runSolanaCycle(input: {
 
   const tokenBal = balInfo.tokens[0];
   const tokenAmount = parseFloat(tokenBal?.amount || "0");
+  const rawBalance = BigInt(tokenBal?.rawAmount || "0");
   const tokenPrice = tokenBal?.priceUsd || (await fetchTokenPriceUsd(input.token)) || 0;
   const tokenUsd = tokenBal?.balanceUsd != null ? tokenBal.balanceUsd : tokenAmount * tokenPrice;
 
@@ -237,6 +368,7 @@ export async function runSolanaCycle(input: {
     };
   }
 
+  // 2. Select trade dollar size along the rotating ladder ($5, $8, $6, $7, $7.50, $9)
   const picked = chooseTradeUsd(tokenUsd, input.cycleIndex ?? 0);
   if (!picked.ok) {
     return {
@@ -247,13 +379,56 @@ export async function runSolanaCycle(input: {
   }
 
   const tokenDecimals = tokenBal?.decimals ?? input.decimals ?? 6;
-  const rawUnits = BigInt(Math.max(1, Math.floor((picked.clip.usd / tokenPrice) * 10 ** tokenDecimals)));
+  let amountIn: bigint;
+  if (tokenPrice > 0) {
+    amountIn = BigInt(Math.max(1, Math.floor((picked.clip.usd / tokenPrice) * 10 ** tokenDecimals)));
+  } else {
+    amountIn = rawBalance / 4n;
+  }
+  // Cap amount to actual wallet token balance so Jupiter never rejects with Insufficient Funds
+  if (rawBalance > 0n && amountIn > rawBalance) {
+    amountIn = rawBalance;
+  }
+  if (amountIn <= 0n) amountIn = 1n;
 
-  // Leg 1: Sell Token -> WSOL
-  const sellOrder = await getJupiterOrder(input.token, WSOL_MINT, rawUnits, walletAddr, 100);
-  if (!sellOrder.ok || !sellOrder.transaction) {
+  // 3. Quoting with flexible spread (250 bps slippage)
+  const sellQuote = await getJupiterQuote(input.token, WSOL_MINT, amountIn, 250);
+  if (!sellQuote.ok || !sellQuote.outAmount || !sellQuote.quoteResponse) {
     return {
-      text: `Jupiter swap order could not be built: ${sellOrder.errorMessage || "No route"}. Swap postponed.`,
+      text: `Could not quote ${input.symbol} on Solana: ${sellQuote.error || "No route found"}. Swap skipped.`,
+      traded: false,
+      retry: "soon",
+    };
+  }
+
+  const buyQuote = await getJupiterQuote(WSOL_MINT, input.token, sellQuote.outAmount, 250);
+  if (!buyQuote.ok || !buyQuote.outAmount) {
+    return {
+      text: `Could not quote ${input.symbol} buyback route on Solana. Swap postponed.`,
+      traded: false,
+      retry: "soon",
+    };
+  }
+
+  // Calculate quoted round trip loss
+  const inUnits = BigInt(sellQuote.inAmount || amountIn.toString());
+  const backUnits = BigInt(buyQuote.outAmount);
+  const lossBps = inUnits > backUnits ? Number(((inUnits - backUnits) * 10000n) / inUnits) : 0;
+  const costPct = Math.max(0, lossBps / 100);
+
+  if (lossBps > MAX_LOSS_BPS) {
+    return {
+      text: `${input.symbol} spread is too wide (quoted cost ${costPct.toFixed(2)}%, max allowed is 8.00%). Swap skipped to protect bag.`,
+      traded: false,
+      retry: "soon",
+    };
+  }
+
+  // 4. Leg 1: Sell Token -> SOL
+  const sellTxBuild = await buildJupiterSwapTx(sellQuote.quoteResponse, walletAddr);
+  if (!sellTxBuild.ok || !sellTxBuild.swapTransaction) {
+    return {
+      text: `Could not build Solana sell transaction: ${sellTxBuild.error || "Build error"}. Swap postponed.`,
       traded: false,
       retry: "soon",
     };
@@ -261,66 +436,80 @@ export async function runSolanaCycle(input: {
 
   let sellTxHash = "";
   try {
-    const txBuf = Buffer.from(sellOrder.transaction, "base64");
-    const vtx = await VersionedTransaction.deserialize(txBuf);
+    const vtx = VersionedTransaction.deserialize(Buffer.from(sellTxBuild.swapTransaction, "base64"));
     await vtx.sign([keypair]);
-    const signedBase64 = Buffer.from(vtx.serialize()).toString("base64");
-
-    const execRes = await executeJupiterSwap(signedBase64, sellOrder.requestId);
-    if (!execRes.ok || !execRes.txHash) {
-      return {
-        text: `Jupiter swap sell submission failed: ${execRes.error || "Unknown error"}`,
-        traded: false,
-        retry: "soon",
-      };
-    }
-    sellTxHash = execRes.txHash;
-  } catch (error) {
+    sellTxHash = await broadcastAndConfirmTx(conn, vtx.serialize());
+  } catch (sellErr) {
     return {
-      text: `Solana transaction signing/broadcast failed: ${error instanceof Error ? error.message : "Error"}`,
+      text: `Solana sell failed: ${sellErr instanceof Error ? sellErr.message : "Broadcast failed"}.`,
       traded: false,
       retry: "soon",
     };
   }
 
-  // Leg 2: Buy back WSOL -> Token (round trip)
+  // Write recovery in case buy leg fails
+  writeRecovery(walletAddr, {
+    token: input.token,
+    symbol: input.symbol,
+    solAmount: sellQuote.outAmount,
+    sellTxHash,
+    inUnits: inUnits.toString(),
+    at: Date.now(),
+  });
+
+  // 5. Leg 2: Buy back SOL -> Token (round trip)
   let buyTxHash = "";
-  const receivedWsol = sellOrder.outAmount ? BigInt(sellOrder.outAmount) : 0n;
-  if (receivedWsol > 0n) {
-    try {
-      await new Promise((r) => setTimeout(r, 2000)); // wait for slot confirmation
-      const buyOrder = await getJupiterOrder(WSOL_MINT, input.token, receivedWsol, walletAddr, 100);
-      if (buyOrder.ok && buyOrder.transaction) {
-        const buyTxBuf = Buffer.from(buyOrder.transaction, "base64");
-        const buyVtx = await VersionedTransaction.deserialize(buyTxBuf);
-        await buyVtx.sign([keypair]);
-        const buySigned = Buffer.from(buyVtx.serialize()).toString("base64");
-        const buyExec = await executeJupiterSwap(buySigned, buyOrder.requestId);
-        if (buyExec.ok && buyExec.txHash) {
-          buyTxHash = buyExec.txHash;
-        }
-      }
-    } catch {
-      /* buyback optional */
+  let boughtUnits = backUnits;
+  try {
+    await new Promise((r) => setTimeout(r, 2000)); // wait for account state update
+
+    // Re-quote buyback with the SOL actually received
+    const freshBuyQuote = await getJupiterQuote(WSOL_MINT, input.token, sellQuote.outAmount, 300);
+    const quoteToUse = freshBuyQuote.ok && freshBuyQuote.quoteResponse ? freshBuyQuote.quoteResponse : buyQuote.quoteResponse;
+    if (freshBuyQuote.ok && freshBuyQuote.outAmount) {
+      boughtUnits = BigInt(freshBuyQuote.outAmount);
     }
+
+    if (quoteToUse) {
+      const buyTxBuild = await buildJupiterSwapTx(quoteToUse, walletAddr);
+      if (buyTxBuild.ok && buyTxBuild.swapTransaction) {
+        const buyVtx = VersionedTransaction.deserialize(Buffer.from(buyTxBuild.swapTransaction, "base64"));
+        await buyVtx.sign([keypair]);
+        buyTxHash = await broadcastAndConfirmTx(conn, buyVtx.serialize());
+        clearRecovery(walletAddr);
+      }
+    }
+  } catch (buyErr) {
+    return {
+      text: [
+        `Sell ${sellTxHash} went through on Solana and the buy did not. ${buyErr instanceof Error ? buyErr.message : "Error"}`,
+        `It will try the buy again by itself. No second sell.`,
+      ].join("\n"),
+      traded: false,
+      halt: true,
+      retry: "soon",
+    };
   }
 
   if (input.onBumpCycleIndex) {
     await input.onBumpCycleIndex((input.cycleIndex ?? 0) + 1);
   }
 
-  const lines = [
-    `🎉 Solana Inactivity Swap completed for ${input.symbol}!`,
-    `Sold $${picked.clip.usd.toFixed(2)} ${input.symbol}.`,
-    buyTxHash ? `Bought back ${input.symbol}.` : `Proceeds swapped to WSOL.`,
-    `Sell Tx: https://solscan.io/tx/${sellTxHash}`,
-  ];
-  if (buyTxHash) {
-    lines.push(`Buy Tx: https://solscan.io/tx/${buyTxHash}`);
-  }
+  const soldFormatted = ethers.formatUnits(inUnits, tokenDecimals);
+  const boughtFormatted = ethers.formatUnits(boughtUnits, tokenDecimals);
 
   return {
-    text: lines.join("\n"),
+    text: [
+      `${input.symbol} round trip sent on Solana.`,
+      `Sold ${soldFormatted}.`,
+      `Bought back ${boughtFormatted}.`,
+      `About $${picked.clip.usd.toFixed(2)} sold and bought back.`,
+      `Quoted cost ${costPct.toFixed(2)}% before the buy was recalculated.`,
+      `Sell`,
+      sellTxHash,
+      `Buy`,
+      buyTxHash,
+    ].join("\n"),
     traded: true,
     retry: "interval",
     txHash: sellTxHash,

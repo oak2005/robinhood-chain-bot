@@ -13,6 +13,7 @@ export interface TokenBalanceInfo {
   tokenAddress: string;
   symbol: string;
   amount: string;
+  rawAmount?: string;
   decimals: number;
   priceUsd: number | null;
   balanceUsd: number | null;
@@ -41,15 +42,39 @@ export async function fetchTokenPriceUsd(addressOrMint: string): Promise<number 
     const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${key}`, {
       signal: AbortSignal.timeout(6000),
     });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const pair = data.pairs?.[0];
-    const price = pair?.priceUsd ? parseFloat(pair.priceUsd) : null;
-    if (price != null && !isNaN(price)) {
-      priceCache.set(key, { price, ts: Date.now() });
-      return price;
+    if (res.ok) {
+      const data = await res.json();
+      const pair = data.pairs?.[0];
+      const price = pair?.priceUsd ? parseFloat(pair.priceUsd) : null;
+      if (price != null && !isNaN(price) && price > 0) {
+        priceCache.set(key, { price, ts: Date.now() });
+        return price;
+      }
     }
   } catch {}
+
+  // Fallback for Solana tokens: quote against USDC via Jupiter v1
+  try {
+    const isSolanaMint = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(key);
+    if (isSolanaMint) {
+      const usdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+      if (key === usdcMint) return 1.0;
+      const res = await fetch(`https://api.jup.ag/swap/v1/quote?inputMint=${key}&outputMint=${usdcMint}&amount=1000000&slippageBps=200`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.outAmount) {
+          const price = Number(data.outAmount) / 1e6;
+          if (price > 0) {
+            priceCache.set(key, { price, ts: Date.now() });
+            return price;
+          }
+        }
+      }
+    }
+  } catch {}
+
   return null;
 }
 
@@ -72,7 +97,7 @@ export async function readSolanaWalletBalances(
 
   // Read SPL Token accounts
   const tokenBalances: TokenBalanceInfo[] = [];
-  let parsedAccounts: Array<{ mint: string; amount: string; decimals: number }> = [];
+  let parsedAccounts: Array<{ mint: string; amount: string; rawAmount: string; decimals: number }> = [];
 
   try {
     // Check standard Token program
@@ -85,6 +110,7 @@ export async function readSolanaWalletBalances(
         parsedAccounts.push({
           mint: info.mint,
           amount: info.tokenAmount?.uiAmountString || "0",
+          rawAmount: info.tokenAmount?.amount || "0",
           decimals: info.tokenAmount?.decimals || 0,
         });
       }
@@ -102,6 +128,7 @@ export async function readSolanaWalletBalances(
         parsedAccounts.push({
           mint: info.mint,
           amount: info.tokenAmount?.uiAmountString || "0",
+          rawAmount: info.tokenAmount?.amount || "0",
           decimals: info.tokenAmount?.decimals || 0,
         });
       }
@@ -112,6 +139,7 @@ export async function readSolanaWalletBalances(
     const mint = t.token.trim();
     const found = parsedAccounts.find((p) => p.mint === mint);
     const amountStr = found ? found.amount : "0";
+    const rawAmount = found ? found.rawAmount : "0";
     const decimals = found ? found.decimals : 9;
     const price = await fetchTokenPriceUsd(mint);
     const numAmount = parseFloat(amountStr) || 0;
@@ -122,6 +150,7 @@ export async function readSolanaWalletBalances(
       tokenAddress: mint,
       symbol: t.symbol || "SPL",
       amount: amountStr,
+      rawAmount,
       decimals,
       priceUsd: price,
       balanceUsd,
