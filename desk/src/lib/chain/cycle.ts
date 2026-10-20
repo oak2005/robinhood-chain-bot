@@ -248,7 +248,15 @@ async function sendSwap(wallet: ethers.Wallet, data: string) {
     throw new Error(`Not enough ETH for gas (${ethers.formatEther(balance)}).`);
   }
   if (process.env.STILLMARK_DRY === "1") throw new Error(`dry static ok gas ${gasLimit.toString()}`);
-  const tx = await router.execute("0x10", [data], deadline, { gasLimit });
+  const feeData = await provider.getFeeData().catch(() => null);
+  const txOverrides: Record<string, any> = { gasLimit };
+  if (feeData?.maxFeePerGas) {
+    txOverrides.maxFeePerGas = feeData.maxFeePerGas;
+    txOverrides.maxPriorityFeePerGas = feeData.maxPriorityFeePerGas ?? 0n;
+  } else if (feeData?.gasPrice) {
+    txOverrides.gasPrice = feeData.gasPrice;
+  }
+  const tx = await router.execute("0x10", [data], deadline, txOverrides);
   const receipt = await tx.wait();
   if (!receipt || receipt.status !== 1) throw new Error("The swap transaction reverted.");
   return tx.hash as string;

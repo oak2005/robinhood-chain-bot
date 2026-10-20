@@ -7,6 +7,9 @@ import nacl from "tweetnacl";
 import { privateKeyToAddress } from "@stacks/transactions";
 import { lookupPayment } from "../src/lib/members/pay.ts";
 import { previewChain, runChainCycle } from "../src/lib/chain/cycle.ts";
+import { readUnifiedWalletBalances } from "../src/lib/chain/balance-reader.ts";
+import { previewSolana, runSolanaCycle } from "../src/lib/chain/solana-cycle.ts";
+import { previewStacks, runStacksCycle } from "../src/lib/chain/stacks-cycle.ts";
 
 const GATE = "/tmp/trade-gate.json";
 const STATE_URL = "https://raw.githubusercontent.com/oak2005/robinhood-chain-bot/main/data/stillmark-bot.json";
@@ -37,6 +40,7 @@ const BUTTONS = {
   "Add token": "/addtoken",
   "Add key": "/addkey",
   "Remove key": "/removekey",
+  "Remove token": "/removetoken",
   Pay: "/pay",
   Dispute: "/dispute",
 };
@@ -526,9 +530,35 @@ async function savedLines(userId) {
         cycleIndex: settings.cycle_index || 0,
       });
       if (preview?.text) lines.push(preview.text);
-    } catch {
-      /* preview optional */
-    }
+    } catch {}
+  }
+
+  const solWallet = wallets.rows.find((w) => w.chain === "solana");
+  const solToken = tokens.rows.find((t) => t.chain === "solana");
+  if (solWallet && solToken) {
+    try {
+      const preview = await previewSolana({
+        address: solWallet.address,
+        token: solToken.token,
+        symbol: solToken.symbol || "SOL_TOKEN",
+        cycleIndex: settings.cycle_index || 0,
+      });
+      if (preview?.text) lines.push(preview.text);
+    } catch {}
+  }
+
+  const stxWallet = wallets.rows.find((w) => w.chain === "stacks");
+  const stxToken = tokens.rows.find((t) => t.chain === "stacks");
+  if (stxWallet && stxToken) {
+    try {
+      const preview = await previewStacks({
+        address: stxWallet.address,
+        token: stxToken.token,
+        symbol: stxToken.symbol || "STX_TOKEN",
+        cycleIndex: settings.cycle_index || 0,
+      });
+      if (preview?.text) lines.push(preview.text);
+    } catch {}
   }
 
   if (settings.last_trade_text) {
@@ -536,6 +566,248 @@ async function savedLines(userId) {
   }
 
   return lines.join("\n");
+}
+
+async function balanceReply(userId) {
+  const database = await db();
+  if (!database) return { text: "No database is connected yet." };
+  const access = await getOrCreateMemberAccess(userId);
+  const settings = await getMemberSettings(userId);
+  const isPaid = access?.paid_until && new Date(access.paid_until).getTime() > Date.now();
+
+  const wallets = await database.query("select chain, address from tg_wallets where user_id = $1 order by chain", [userId]);
+  const tokens = await database.query("select id, chain, token, symbol from tg_tokens where user_id = $1 order by chain", [userId]);
+
+  if (!wallets.rows.length) {
+    return {
+      text: [
+        "💰 *Wallet & Token Balances*",
+        "",
+        "No wallet is saved for this Telegram account yet.",
+        "Send /pay to activate, then tap Add key to store a fresh wallet.",
+      ].join("\n"),
+      reply_markup: {
+        inline_keyboard: [[{ text: "🔑 Add Key", callback_data: "action:addkey" }]],
+      },
+    };
+  }
+
+  const mins = Math.max(0, Math.ceil(((Number(settings.next_recheck_ms) || 0) - Date.now()) / 60000));
+  const statusLine = settings.paused ? "⏸️ Status: Paused" : "🟢 Status: Active (Running on its own)";
+  const whenLine = settings.paused ? "Trading is paused." : mins <= 0 ? "Next swap is due." : `Next swap in about ${mins} min.`;
+  const accessLine = isPaid
+    ? `Access: Active until ${new Date(access.paid_until).toUTCString()}`
+    : "Access: Inactive / Expired. Send /pay to activate ($20/30 days).";
+
+  const lines = [
+    "💰 *Live Wallet & Token Balances*",
+    statusLine,
+    whenLine,
+    accessLine,
+    "",
+  ];
+
+  for (const w of wallets.rows) {
+    const chainTokens = tokens.rows.filter((t) => t.chain === w.chain);
+    lines.push(`👛 *Wallet (${w.chain.toUpperCase()}):*`);
+    lines.push(`Address: \`${w.address}\``);
+
+    try {
+      const bal = await readUnifiedWalletBalances(w.chain, w.address, chainTokens);
+      const nativeUsd = bal.nativeBalanceUsd ? ` ($${bal.nativeBalanceUsd.toFixed(2)})` : "";
+      lines.push(`• Gas: *${bal.nativeAmount} ${bal.nativeSymbol}*${nativeUsd}`);
+
+      if (bal.tokens.length > 0) {
+        for (const tb of bal.tokens) {
+          const usdVal = tb.balanceUsd != null ? ` ($${tb.balanceUsd.toFixed(2)})` : "";
+          lines.push(`• Token: *${tb.amount} ${tb.symbol}*${usdVal}`);
+          lines.push(`  Address: \`${tb.tokenAddress}\``);
+        }
+      } else {
+        lines.push(`  (No tokens added for ${w.chain}. Tap Add token.)`);
+      }
+    } catch (err) {
+      lines.push(`  Balance lookup: ${err instanceof Error ? err.message : "RPC busy"}`);
+    }
+    lines.push("");
+  }
+
+  return {
+    text: lines.join("\n"),
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "🔄 Refresh Balance", callback_data: "action:balance" },
+          { text: "🪙 View Tokens", callback_data: "action:token" },
+        ],
+      ],
+    },
+  };
+}
+
+async function configReply(userId, isAdmin) {
+  const database = await db();
+  if (!database) return { text: "No database is connected yet." };
+  const settings = await getMemberSettings(userId);
+  const gate = readGate();
+
+  const isPaused = isAdmin ? gate.paused === true : settings.paused === true;
+  const currentInterval = isAdmin ? (gate.interval || "30m") : (settings.interval || "30m");
+
+  const wallets = await database.query("select chain, address from tg_wallets where user_id = $1 order by chain", [userId]);
+  const tokens = await database.query("select id, chain, token, symbol from tg_tokens where user_id = $1 order by chain", [userId]);
+
+  const mins = Math.max(0, Math.ceil(((Number(settings.next_recheck_ms) || 0) - Date.now()) / 60000));
+  const when = isPaused ? "Trading is paused." : mins <= 0 ? "Next swap is due." : `Next swap in about ${mins} min.`;
+
+  const lines = [
+    "⚙️ *Inactivity Trade Configuration*",
+    "",
+    `• Bot Status: ${isPaused ? "⏸️ Paused (No new swaps)" : "🟢 Active (Running on its own)"}`,
+    `• Interval: *${currentInterval}* quiet window`,
+    `• Rotating Size Ladder: $5 ➔ $8 ➔ $6 ➔ $7 ➔ $7.50 ➔ $9`,
+    `• Cycle Index: #${settings.cycle_index || 0}`,
+    `• Swap Clock: ${when}`,
+    `• Saved Wallets: ${wallets.rows.length}`,
+    `• Saved Tokens: ${tokens.rows.length}/3`,
+  ];
+
+  if (settings.last_trade_text) {
+    lines.push("");
+    lines.push(`*Last Activity:*`);
+    lines.push(settings.last_trade_text);
+  }
+
+  lines.push("");
+  lines.push("Tap below to adjust interval or pause/resume:");
+
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: currentInterval === "10m" ? "✅ 10m" : "10m", callback_data: "interval:10m" },
+        { text: currentInterval === "20m" ? "✅ 20m" : "20m", callback_data: "interval:20m" },
+        { text: currentInterval === "30m" ? "✅ 30m" : "30m", callback_data: "interval:30m" },
+        { text: currentInterval === "1h" ? "✅ 1h" : "1h", callback_data: "interval:1h" },
+      ],
+      [
+        isPaused
+          ? { text: "▶️ Resume Trading", callback_data: "action:resume" }
+          : { text: "⏸️ Pause Trading", callback_data: "action:pause" },
+        { text: "🪙 Manage Tokens", callback_data: "action:token" },
+      ],
+      [
+        { text: "💰 Live Balances", callback_data: "action:balance" },
+        { text: "🔄 Refresh Config", callback_data: "action:config" },
+      ],
+    ],
+  };
+
+  return {
+    text: lines.join("\n"),
+    reply_markup: keyboard,
+  };
+}
+
+async function tokenReply(userId) {
+  const database = await db();
+  if (!database) return { text: "No database is connected yet." };
+
+  const tokens = await database.query("select id, chain, token, symbol from tg_tokens where user_id = $1 order by chain", [userId]);
+
+  if (!tokens.rows.length) {
+    return {
+      text: [
+        "🪙 *Token Management*",
+        "",
+        "No tokens are currently saved for this account.",
+        "You can add up to 3 tokens to trade on Solana, Stacks, or Robinhood.",
+        "",
+        "Tap Add token below to add a coin address:",
+      ].join("\n"),
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "➕ Add Token", callback_data: "action:addtoken" }],
+          [{ text: "🔄 Refresh", callback_data: "action:token" }],
+        ],
+      },
+    };
+  }
+
+  const lines = [
+    `🪙 *Active Trading Tokens (${tokens.rows.length}/3)*`,
+    "",
+    "Below are the tokens configured for your account.",
+    "Tap any ❌ button below to remove that specific token:",
+    "",
+  ];
+
+  const inlineButtons = [];
+
+  for (let i = 0; i < tokens.rows.length; i++) {
+    const t = tokens.rows[i];
+    const name = t.symbol || "TOKEN";
+    const shortAddr = t.token.length > 12 ? `${t.token.slice(0, 6)}…${t.token.slice(-4)}` : t.token;
+    lines.push(`${i + 1}. *${name}* on *${t.chain.toUpperCase()}*`);
+    lines.push(`   Address: \`${t.token}\``);
+
+    inlineButtons.push([
+      {
+        text: `❌ Remove ${name} (${shortAddr})`,
+        callback_data: `token:remove:${t.id}`,
+      },
+    ]);
+  }
+
+  const actionRow = [];
+  if (tokens.rows.length < 3) {
+    actionRow.push({ text: "➕ Add Token", callback_data: "action:addtoken" });
+  }
+  actionRow.push({ text: "🔄 Refresh", callback_data: "action:token" });
+  inlineButtons.push(actionRow);
+
+  return {
+    text: lines.join("\n"),
+    reply_markup: { inline_keyboard: inlineButtons },
+  };
+}
+
+async function removeTokenById(userId, tokenId) {
+  const database = await db();
+  if (!database) return { ok: false, error: "Database not connected." };
+  const res = await database.query(
+    "delete from tg_tokens where id = $1 and user_id = $2 returning token, symbol, chain",
+    [tokenId, userId],
+  );
+  if (!res.rows.length) {
+    const byAddr = await database.query(
+      "delete from tg_tokens where (lower(token) = lower($1) or lower(symbol) = lower($1)) and user_id = $2 returning token, symbol, chain",
+      [tokenId, userId],
+    );
+    if (byAddr.rows.length) {
+      return { ok: true, deleted: byAddr.rows[0] };
+    }
+    return { ok: false, error: "Token not found or already removed." };
+  }
+  return { ok: true, deleted: res.rows[0] };
+}
+
+async function removeTokenCommand(userId, arg) {
+  if (!arg) {
+    return tokenReply(userId);
+  }
+  const res = await removeTokenById(userId, arg.trim());
+  if (!res.ok) {
+    const current = await tokenReply(userId);
+    return {
+      text: `Could not find token "${arg}".\n\n${current.text}`,
+      reply_markup: current.reply_markup,
+    };
+  }
+  const reply = await tokenReply(userId);
+  return {
+    text: `✅ Removed token ${res.deleted.symbol || res.deleted.token} on ${res.deleted.chain}.\n\n${reply.text}`,
+    reply_markup: reply.reply_markup,
+  };
 }
 
 const token = (process.env.TELEGRAM_BOT_TOKEN ?? "").trim();
@@ -581,6 +853,7 @@ async function setupBotMenu() {
     { command: "addkey", description: "Add wallet private key" },
     { command: "addtoken", description: "Add token coin address" },
     { command: "removekey", description: "Remove saved wallet and tokens" },
+    { command: "removetoken", description: "Remove a saved token" },
     { command: "pay", description: "Pay for access ($20/30 days)" },
     { command: "dispute", description: "Raise transaction dispute for admin review" },
     { command: "help", description: "How to use Inactivity Trade" },
@@ -656,6 +929,7 @@ function helpText() {
     "Interval: Choose between 10m, 20m, 30m, or 1h.",
     "Add key: Store your fresh wallet private key (AES-256 sealed).",
     "Add token: Add a coin contract address (up to 3 tokens).",
+    "Remove token: Remove a specific token by clicking its ❌ button.",
     "Remove key: Clear your saved wallets and tokens.",
     "Pay: Access is at least $20/30 days USDT, USDC, or USDG on Solana, Base, BNB, or Robinhood (no memo required).",
     "Dispute: If a transaction needs manual verification, send /dispute <txHash> to submit to admin.",
@@ -721,7 +995,11 @@ async function ownerReply(cmd, arg) {
       ].join("\n"),
     };
   }
-  if (cmd === "/status" || cmd === "/balance" || cmd === "/tokeninfo" || cmd === "/token" || cmd === "/config") return { text: await ownerStatus() };
+  if (cmd === "/balance") return balanceReply(admin);
+  if (cmd === "/config") return configReply(admin, true);
+  if (cmd === "/tokeninfo" || cmd === "/token") return tokenReply(admin);
+  if (cmd === "/removetoken") return removeTokenCommand(admin, arg);
+  if (cmd === "/status") return { text: await ownerStatus() };
   if (cmd === "/help" || cmd === "/start") return { text: `Running on its own.\n\n${helpText()}` };
   return { text: helpText() };
 }
@@ -817,6 +1095,17 @@ async function takePending(chatId, userId, text) {
       symbol = await Promise.race([erc20.symbol(), new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000))]);
     } catch {}
   }
+  if (state.chain === "solana" || state.chain === "stacks") {
+    try {
+      const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${tokenText}`, {
+        signal: AbortSignal.timeout(4000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        symbol = data.pairs?.[0]?.baseToken?.symbol || "";
+      }
+    } catch {}
+  }
   await database.query("insert into tg_tokens (id, user_id, chain, token, symbol) values ($1, $2, $3, $4, $5)", [
     randomUUID(),
     userId,
@@ -862,7 +1151,11 @@ async function guestCommand(chatId, userId, cmd, arg) {
   if (cmd === "/addkey") return beginKey(chatId);
   if (cmd === "/addtoken") return beginToken(chatId);
   if (cmd === "/removekey") return { text: await removeKeys(userId) };
-  if (cmd === "/balance" || cmd === "/status" || cmd === "/tokeninfo" || cmd === "/token" || cmd === "/config") return { text: await savedLines(userId) };
+  if (cmd === "/balance") return balanceReply(userId);
+  if (cmd === "/config") return configReply(userId, false);
+  if (cmd === "/tokeninfo" || cmd === "/token") return tokenReply(userId);
+  if (cmd === "/removetoken") return removeTokenCommand(userId, arg);
+  if (cmd === "/status") return { text: await savedLines(userId) };
   if (cmd === "/start") {
     return {
       text: [
@@ -917,7 +1210,7 @@ async function checkMemberSwaps() {
 
     const byUser = new Map();
     for (const row of membersRes.rows) {
-      if (admin && row.user_id === admin) continue; // NASTY owner wallet runs on GitHub Actions ONLY!
+      if (admin && row.user_id === admin && row.chain === "robinhood") continue; // NASTY owner wallet on Robinhood runs on GitHub Actions ONLY!
       if (!byUser.has(row.user_id)) byUser.set(row.user_id, []);
       byUser.get(row.user_id).push(row);
     }
@@ -970,6 +1263,90 @@ async function checkMemberSwaps() {
               }
             } catch (tradeErr) {
               const errText = tradeErr instanceof Error ? tradeErr.message : "Swap failed";
+              await updateMemberSettings(userId, {
+                next_recheck_ms: nextRecheck,
+                last_trade_text: errText,
+              });
+            }
+          }
+
+          if (item.chain === "solana") {
+            let secret = "";
+            try {
+              secret = unseal(item.wrapped);
+            } catch {
+              continue;
+            }
+            if (!secret) continue;
+
+            try {
+              const result = await runSolanaCycle({
+                privateKey: secret,
+                token: item.token,
+                symbol: item.symbol || "SOL_TOKEN",
+                walletAddress: item.address,
+                cycleIndex: settings.cycle_index || 0,
+                onBumpCycleIndex: async (nextIdx) => {
+                  await updateMemberSettings(userId, { cycle_index: nextIdx });
+                },
+              });
+
+              await updateMemberSettings(userId, {
+                next_recheck_ms: nextRecheck,
+                last_trade_ms: now,
+                last_trade_text: result.text,
+              });
+
+              if (result.traded) {
+                const chatId = Number(userId);
+                if (chatId) {
+                  await send(chatId, result.text).catch(() => {});
+                }
+              }
+            } catch (tradeErr) {
+              const errText = tradeErr instanceof Error ? tradeErr.message : "Solana swap failed";
+              await updateMemberSettings(userId, {
+                next_recheck_ms: nextRecheck,
+                last_trade_text: errText,
+              });
+            }
+          }
+
+          if (item.chain === "stacks") {
+            let secret = "";
+            try {
+              secret = unseal(item.wrapped);
+            } catch {
+              continue;
+            }
+            if (!secret) continue;
+
+            try {
+              const result = await runStacksCycle({
+                privateKey: secret,
+                token: item.token,
+                symbol: item.symbol || "STX_TOKEN",
+                walletAddress: item.address,
+                cycleIndex: settings.cycle_index || 0,
+                onBumpCycleIndex: async (nextIdx) => {
+                  await updateMemberSettings(userId, { cycle_index: nextIdx });
+                },
+              });
+
+              await updateMemberSettings(userId, {
+                next_recheck_ms: nextRecheck,
+                last_trade_ms: now,
+                last_trade_text: result.text,
+              });
+
+              if (result.traded) {
+                const chatId = Number(userId);
+                if (chatId) {
+                  await send(chatId, result.text).catch(() => {});
+                }
+              }
+            } catch (tradeErr) {
+              const errText = tradeErr instanceof Error ? tradeErr.message : "Stacks swap failed";
               await updateMemberSettings(userId, {
                 next_recheck_ms: nextRecheck,
                 last_trade_text: errText,
@@ -1065,6 +1442,65 @@ while (true) {
             const disputeId = data.replace("dispute:reject:", "");
             const resText = await resolveDisputeEntry(disputeId, "reject");
             await send(chatId, resText);
+            continue;
+          }
+
+          if (data.startsWith("token:remove:")) {
+            const tokenId = data.replace("token:remove:", "");
+            const rmRes = await removeTokenById(userId, tokenId);
+            const feedback = rmRes.ok
+              ? `✅ Removed token ${rmRes.deleted?.symbol ? `${rmRes.deleted.symbol} ` : ""}(${rmRes.deleted?.token?.slice(0, 8)}…).`
+              : "❌ Token not found or already removed.";
+            const reply = await tokenReply(userId);
+            await send(chatId, `${feedback}\n\n${reply.text}`, reply.reply_markup);
+            continue;
+          }
+
+          if (data === "action:token") {
+            const reply = await tokenReply(userId);
+            await send(chatId, reply.text, reply.reply_markup);
+            continue;
+          }
+
+          if (data === "action:balance") {
+            const reply = await balanceReply(userId);
+            await send(chatId, reply.text, reply.reply_markup);
+            continue;
+          }
+
+          if (data === "action:config") {
+            const reply = await configReply(userId, isAdmin);
+            await send(chatId, reply.text, reply.reply_markup);
+            continue;
+          }
+
+          if (data === "action:addtoken") {
+            const reply = await beginToken(chatId);
+            await send(chatId, reply.text, reply.reply_markup);
+            continue;
+          }
+
+          if (data === "action:addkey") {
+            const reply = await beginKey(chatId);
+            await send(chatId, reply.text, reply.reply_markup);
+            continue;
+          }
+
+          if (data === "action:pause") {
+            if (isAdmin) writeGate({ paused: true });
+            await updateMemberSettings(userId, { paused: true });
+            const reply = await configReply(userId, isAdmin);
+            await send(chatId, "⏸️ Trading paused.\n\n" + reply.text, reply.reply_markup);
+            continue;
+          }
+
+          if (data === "action:resume") {
+            if (isAdmin) writeGate({ paused: false });
+            const settings = await getMemberSettings(userId);
+            const intervalSec = INTERVALS_SEC[settings.interval] || 1800;
+            await updateMemberSettings(userId, { paused: false, next_recheck_ms: Date.now() + intervalSec * 1000 });
+            const reply = await configReply(userId, isAdmin);
+            await send(chatId, "▶️ Trading resumed.\n\n" + reply.text, reply.reply_markup);
             continue;
           }
 
@@ -1176,6 +1612,12 @@ while (true) {
           const reply = cmd === "/addkey" ? await beginKey(chatId) : cmd === "/addtoken" ? await beginToken(chatId) : { text: await removeKeys(userId) };
           const text = isAdmin ? `${reply.text}\nThis does not replace the wallet already trading.` : reply.text;
           await send(chatId, text, reply.reply_markup);
+          continue;
+        }
+
+        if (cmd === "/removetoken") {
+          const reply = await removeTokenCommand(userId, arg);
+          await send(chatId, reply.text, reply.reply_markup);
           continue;
         }
 

@@ -17,6 +17,7 @@ const BUTTONS: Record<string, string> = {
   "Add token": "/addtoken",
   "Add key": "/addkey",
   "Remove key": "/removekey",
+  "Remove token": "/removetoken",
   Pay: "/pay",
 };
 
@@ -88,6 +89,7 @@ export async function setupBotMenu(token: string) {
     { command: "addkey", description: "Add wallet private key" },
     { command: "addtoken", description: "Add token coin address" },
     { command: "removekey", description: "Remove saved wallet and tokens" },
+    { command: "removetoken", description: "Remove a saved token" },
     { command: "pay", description: "Pay for access ($20/30 days)" },
     { command: "help", description: "How to use Inactivity Trade" },
   ];
@@ -192,11 +194,23 @@ async function drainCommands() {
         state.paused = false;
         dirty = true;
         reply = "Stopped. Tap Resume to turn swaps back on.";
-      } else if (cmd === "/status" || cmd === "/balance" || cmd === "/tokeninfo") {
+      } else if (cmd === "/status") {
         const head = [modeLine(state), nextLine(state)];
         if (state.token) head.push(state.token.symbol, state.token.address);
         reply = `${head.join("\n")}\n${await chainText()}`;
         dirty = Boolean(state.pool) || Boolean(state.lastPreview);
+      } else if (cmd === "/balance") {
+        reply = `💰 Balance\n${modeLine(state)}\n${await chainText()}`;
+        dirty = Boolean(state.pool) || Boolean(state.lastPreview);
+      } else if (cmd === "/tokeninfo" || cmd === "/token") {
+        reply = state.token
+          ? `🪙 Token: ${state.token.symbol}\nContract: ${state.token.address}\n\nTo remove this token, send /removetoken`
+          : "No token saved yet. Tap Add token.";
+      } else if (cmd === "/removetoken") {
+        state.token = null;
+        state.pool = null;
+        dirty = true;
+        reply = "Removed saved token.";
       } else if (cmd === "/config") {
         const interval = state.config?.interval ?? "30m";
         reply = [
@@ -255,7 +269,19 @@ function guestReply(cmd: string): string {
   if (cmd === "/addkey" || cmd === "/addtoken" || cmd === "/removekey") {
     return "Tap Add key. The next message should be a fresh wallet private key, not the wallet already trading. Then tap Add token.";
   }
-  if (cmd === "/balance" || cmd === "/status" || cmd === "/tokeninfo" || cmd === "/token" || cmd === "/config") {
+  if (cmd === "/balance") {
+    return "No wallet is saved for this Telegram account yet. Tap Add key.";
+  }
+  if (cmd === "/config") {
+    return "Trading configuration: 30m interval, size rotates: $5, $8, $6, $7, $7.50, $9. Tap Add key to configure.";
+  }
+  if (cmd === "/tokeninfo" || cmd === "/token") {
+    return "No token is saved for this Telegram account yet. Tap Add key, then Add token.";
+  }
+  if (cmd === "/removetoken") {
+    return "Tap Remove key to clear your saved wallet and tokens.";
+  }
+  if (cmd === "/status") {
     return "No wallet is saved for this Telegram account yet. Tap Add key.";
   }
   return [

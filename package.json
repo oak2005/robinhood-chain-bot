@@ -2,5 +2,11 @@
   "name": "robinhood-chain-bot",
   "private": true,
   "type": "module",
-  "dependencies": { "ethers": "6.17.0" }
+  "dependencies": {
+    "@solana/web3.js": "^3.1.1",
+    "@stacks/transactions": "^7.6.0",
+    "bs58": "^6.0.0",
+    "ethers": "6.17.0",
+    "tweetnacl": "^1.0.3"
+  }
 }
