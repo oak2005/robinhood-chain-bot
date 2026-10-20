@@ -31,6 +31,18 @@ export type OperatorRow = {
   covered: boolean;
 };
 
+export type DisputeRow = {
+  id: string;
+  userId: string;
+  txHash: string;
+  chain: string;
+  userNote: string;
+  status: "pending" | "accepted" | "rejected";
+  adminNote: string;
+  createdAt: string;
+  resolvedAt: string | null;
+};
+
 const SECRET_KEYS = ["privateKey", "secret", "wrapped", "seed", "mnemonic"];
 
 export function assertNoSecret(value: unknown): void {

@@ -26,10 +26,8 @@ export type PayChain = "solana" | "base" | "bsc" | "robinhood";
 
 type Verdict = { ok: true; asset: string; amount: string } | { ok: false; error: string };
 
-export function readSolanaPayment(tx: SolanaTx, memo: string): Verdict {
+export function readSolanaPayment(tx: SolanaTx, _memo?: string): Verdict {
   if (tx.meta?.err) return { ok: false, error: "That Solana transaction failed." };
-  const text = memos(tx);
-  if (!text.includes(memo)) return { ok: false, error: "The memo on that Solana transaction does not match your code." };
   let received = 0;
   for (const post of tx.meta?.postTokenBalances ?? []) {
     const asset = SOL_MINTS[post.mint];
@@ -45,13 +43,10 @@ export function readSolanaPayment(tx: SolanaTx, memo: string): Verdict {
   return { ok: false, error: "No USDT or USDC arrived in that transaction." };
 }
 
-export function readEvmPayment(chain: "base" | "bsc" | "robinhood", tx: EvmTx, receipt: EvmReceipt, memo: string): Verdict {
+export function readEvmPayment(chain: "base" | "bsc" | "robinhood", _tx: EvmTx, receipt: EvmReceipt, _memo?: string): Verdict {
   if (receipt.status !== "0x1") return { ok: false, error: "That transaction failed." };
   const wanted = PAY_EVM.toLowerCase();
   const padded = `0x${wanted.slice(2).padStart(64, "0")}`;
-  const input = (tx.input ?? "").toLowerCase();
-  const memoHex = Buffer.from(memo, "utf8").toString("hex");
-  const hasMemo = input.includes(memo.toLowerCase()) || input.includes(memoHex);
   for (const token of EVM_TOKENS[chain]) {
     for (const log of receipt.logs ?? []) {
       if (log.address.toLowerCase() !== token.address) continue;
@@ -59,16 +54,13 @@ export function readEvmPayment(chain: "base" | "bsc" | "robinhood", tx: EvmTx, r
       if ((log.topics?.[2] ?? "").toLowerCase() !== padded) continue;
       const value = BigInt(log.data);
       const minimum = 20n * 10n ** BigInt(token.decimals);
-      if (hasMemo && value >= minimum) {
+      if (value >= minimum) {
         const whole = value / 10n ** BigInt(token.decimals);
         const frac = value % 10n ** BigInt(token.decimals);
         const fracText = frac.toString().padStart(token.decimals, "0").replace(/0+$/, "") || "0";
         return { ok: true, asset: token.symbol, amount: fracText === "0" ? whole.toString() : `${whole}.${fracText}` };
       }
       if (value > 0n && value < minimum) return { ok: false, error: "That transfer is under $20." };
-      if (value >= minimum && !hasMemo) {
-        return { ok: false, error: "The memo is missing. Put your memo in the transaction data, then check again." };
-      }
     }
   }
   return {
@@ -113,7 +105,7 @@ const RPC: Record<PayChain, string> = {
   robinhood: "https://rpc.robinhoodchain.com",
 };
 
-export async function lookupPayment(chain: PayChain, txHash: string, memo: string): Promise<Verdict> {
+export async function lookupPayment(chain: PayChain, txHash: string, memo?: string): Promise<Verdict> {
   if (chain === "solana") {
     if (!/^[1-9A-HJ-NP-Za-km-z]{64,128}$/.test(txHash)) return { ok: false, error: "That is not a Solana transaction signature." };
     const tx = await rpc<SolanaTx | null>(RPC.solana, "getTransaction", [txHash, { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 }]);

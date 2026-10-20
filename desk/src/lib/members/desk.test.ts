@@ -31,8 +31,7 @@ test("robinhood address comes from the hex key", () => {
   assert.equal(derived.address.includes(wallet.privateKey.slice(2)), false);
 });
 
-test("solana memo and a 20 USDC credit pass, a plain transfer does not", () => {
-  const memo = "K7H2QA";
+test("solana 20 USDC credit passes with or without memo, under 20 does not", () => {
   const tx = {
     meta: {
       err: null,
@@ -49,18 +48,32 @@ test("solana memo and a 20 USDC credit pass, a plain transfer does not", () => {
     },
     transaction: {
       message: {
-        instructions: [{ programId: "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr", program: "spl-memo", parsed: memo }],
+        instructions: [],
       },
     },
   };
-  assert.equal(readSolanaPayment(tx, memo).ok, true);
-  assert.equal(readSolanaPayment(tx, "OTHER1").ok, false);
+  assert.equal(readSolanaPayment(tx).ok, true);
+  assert.equal(readSolanaPayment(tx, "K7H2QA").ok, true);
+
+  const underTx = {
+    ...tx,
+    meta: {
+      ...tx.meta,
+      postTokenBalances: [
+        {
+          accountIndex: 1,
+          mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          owner: "GLrFg8GR7iNotxJRvVHakdbhpRHjEEe8EHXVmjHxNG1T",
+          uiTokenAmount: { uiAmountString: "19.5" },
+        },
+      ],
+    },
+  };
+  assert.equal(readSolanaPayment(underTx).ok, false);
 });
 
-test("base payment needs the memo and at least 20, and more than 20 is accepted", () => {
-  const memo = "K7H2QA";
+test("base payment accepts 20 or more without memo, under 20 is rejected", () => {
   const deposit = `0x${PAY_EVM.slice(2).toLowerCase().padStart(64, "0")}`;
-  const memoHex = Buffer.from(memo, "utf8").toString("hex");
   const receipt = (data: bigint) => ({
     status: "0x1",
     logs: [
@@ -71,15 +84,13 @@ test("base payment needs the memo and at least 20, and more than 20 is accepted"
       },
     ],
   });
-  assert.equal(readEvmPayment("base", { input: "0x" + memoHex }, receipt(25_000_000n), memo).ok, true);
-  assert.equal(readEvmPayment("base", { input: "0x" }, receipt(25_000_000n), memo).ok, false);
-  assert.equal(readEvmPayment("base", { input: "0x" + memoHex }, receipt(19_000_000n), memo).ok, false);
+  assert.equal(readEvmPayment("base", { input: "0x" }, receipt(25_000_000n)).ok, true);
+  assert.equal(readEvmPayment("base", { input: "0x" }, receipt(20_000_000n)).ok, true);
+  assert.equal(readEvmPayment("base", { input: "0x" }, receipt(19_000_000n)).ok, false);
 });
 
-test("robinhood payment needs the memo and at least 20 USDG, and more than 20 is accepted", () => {
-  const memo = "K7H2QA";
+test("robinhood payment accepts at least 20 USDG without memo, under 20 is rejected", () => {
   const deposit = `0x${PAY_EVM.slice(2).toLowerCase().padStart(64, "0")}`;
-  const memoHex = Buffer.from(memo, "utf8").toString("hex");
   const receipt = (data: bigint) => ({
     status: "0x1",
     logs: [
@@ -90,15 +101,14 @@ test("robinhood payment needs the memo and at least 20 USDG, and more than 20 is
       },
     ],
   });
-  const okResult = readEvmPayment("robinhood", { input: "0x" + memoHex }, receipt(20_000_000n), memo);
+  const okResult = readEvmPayment("robinhood", { input: "0x" }, receipt(20_000_000n));
   assert.equal(okResult.ok, true);
   if (okResult.ok) {
     assert.equal(okResult.asset, "USDG");
     assert.equal(okResult.amount, "20");
   }
-  assert.equal(readEvmPayment("robinhood", { input: "0x" + memoHex }, receipt(35_500_000n), memo).ok, true);
-  assert.equal(readEvmPayment("robinhood", { input: "0x" }, receipt(25_000_000n), memo).ok, false);
-  assert.equal(readEvmPayment("robinhood", { input: "0x" + memoHex }, receipt(19_999_999n), memo).ok, false);
+  assert.equal(readEvmPayment("robinhood", { input: "0x" }, receipt(35_500_000n)).ok, true);
+  assert.equal(readEvmPayment("robinhood", { input: "0x" }, receipt(19_999_999n)).ok, false);
 });
 
 test("sealed key round-trips and operator payloads have no secret field", () => {

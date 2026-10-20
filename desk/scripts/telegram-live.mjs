@@ -18,7 +18,7 @@ const MENU = {
     [{ text: "Help" }, { text: "Resume" }, { text: "Pause" }],
     [{ text: "Stop" }, { text: "Interval" }, { text: "Token" }],
     [{ text: "Add token" }, { text: "Add key" }, { text: "Remove key" }],
-    [{ text: "Pay" }],
+    [{ text: "Pay" }, { text: "Dispute" }],
   ],
   resize_keyboard: true,
   is_persistent: true,
@@ -38,6 +38,7 @@ const BUTTONS = {
   "Add key": "/addkey",
   "Remove key": "/removekey",
   Pay: "/pay",
+  Dispute: "/dispute",
 };
 
 const INTERVALS = ["10m", "20m", "30m", "1h"];
@@ -159,6 +160,17 @@ async function db() {
       last_trade_ms bigint not null default 0,
       last_trade_text text not null default ''
     )`);
+    await pool.query(`create table if not exists payment_disputes (
+      id text primary key,
+      user_id text not null,
+      tx_hash text not null,
+      chain text not null,
+      user_note text not null default '',
+      status text not null default 'pending',
+      admin_note text not null default '',
+      created_at timestamptz not null default now(),
+      resolved_at timestamptz
+    )`);
   }
   return pool;
 }
@@ -218,9 +230,6 @@ async function payInfoText(userId) {
     `Inactivity Trade — Access & Payment`,
     coveredText,
     "",
-    `Your unique memo: ${access.memo}`,
-    "You MUST include this exact memo in the transaction (Solana memo program, or in Base/BNB/Robinhood transaction input).",
-    "",
     "Accepted tokens: USDT, USDC, or USDG (minimum $20)",
     "",
     "Solana deposit (USDT/USDC):",
@@ -229,10 +238,156 @@ async function payInfoText(userId) {
     "Base / BNB deposit (USDT/USDC) & Robinhood Chain deposit (USDG):",
     "0x4a543eEbBB5DFaA2FE0E4f36E84b0eaf5803D7DD",
     "",
-    "Robinhood Chain USDG contract:",
-    "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
-    "",
     "After sending, paste your transaction hash in this chat to activate.",
+  ].join("\n");
+}
+
+async function raiseDisputeEntry(userId, txHash, userNote = "") {
+  const database = await db();
+  if (!database) return { text: "Database is not connected. Cannot submit dispute." };
+  const cleanHash = txHash.trim();
+  const isSolana = /^[1-9A-HJ-NP-Za-km-z]{64,128}$/.test(cleanHash);
+  const isEvm = /^0x[0-9a-fA-F]{64}$/.test(cleanHash);
+  if (!isSolana && !isEvm) {
+    return { text: "That does not look like a valid Solana signature or EVM transaction hash." };
+  }
+  const chainName = isSolana ? "solana" : "evm";
+
+  const used = await database.query("select tx_hash from used_payments where tx_hash = $1", [cleanHash.toLowerCase()]);
+  if (used.rows.length > 0) {
+    return { text: "That transaction hash has already been credited." };
+  }
+
+  const existing = await database.query(
+    "select id, status from payment_disputes where lower(tx_hash) = $1 and status = 'pending'",
+    [cleanHash.toLowerCase()],
+  );
+  if (existing.rows.length > 0) {
+    return { text: `A dispute for this transaction is already pending admin review (Dispute #${existing.rows[0].id}).` };
+  }
+
+  const disputeId = `disp_${randomUUID().slice(0, 8)}`;
+  await database.query(
+    "insert into payment_disputes (id, user_id, tx_hash, chain, user_note, status) values ($1, $2, $3, $4, $5, 'pending')",
+    [disputeId, userId, cleanHash, chainName, userNote.slice(0, 500)],
+  );
+
+  if (admin) {
+    const explorer = isSolana
+      ? `https://solscan.io/tx/${cleanHash}`
+      : `https://basescan.org/tx/${cleanHash}`;
+    const adminText = [
+      `🚨 *NEW TRANSACTION DISPUTE* #${disputeId}`,
+      `User ID: \`${userId}\``,
+      `Tx: \`${cleanHash}\``,
+      `Chain: ${chainName.toUpperCase()}`,
+      `Explorer: ${explorer}`,
+      userNote ? `User Note: ${userNote}` : "",
+      "",
+      "Tap below to accept or reject:",
+    ].filter(Boolean).join("\n");
+
+    const adminMarkup = {
+      inline_keyboard: [
+        [
+          { text: "✅ Accept & Credit 30d", callback_data: `dispute:accept:${disputeId}` },
+          { text: "❌ Reject", callback_data: `dispute:reject:${disputeId}` },
+        ],
+      ],
+    };
+    await send(Number(admin), adminText, adminMarkup).catch(() => {});
+  }
+
+  return {
+    text: [
+      `Transaction dispute submitted! (ID: #${disputeId})`,
+      `Tx: ${cleanHash}`,
+      "",
+      "Your transaction has been sent to the admin portal for verification.",
+      "The admin will review and either accept or reject your dispute.",
+      "You will receive a notification in this chat as soon as it is processed.",
+    ].join("\n"),
+  };
+}
+
+async function resolveDisputeEntry(disputeId, action, adminNote = "") {
+  const database = await db();
+  if (!database) return "Database not connected.";
+  const res = await database.query("select * from payment_disputes where id = $1", [disputeId]);
+  if (!res.rows.length) return `Dispute #${disputeId} not found.`;
+  const dispute = res.rows[0];
+  if (dispute.status !== "pending") return `Dispute #${disputeId} was already resolved as ${dispute.status.toUpperCase()}.`;
+
+  const note = adminNote.trim() || (action === "accept" ? "Approved by admin" : "Rejected by admin");
+
+  if (action === "accept") {
+    const access = await getOrCreateMemberAccess(dispute.user_id);
+    const current = access?.paid_until && new Date(access.paid_until).getTime() > Date.now()
+      ? new Date(access.paid_until).getTime()
+      : Date.now();
+    const newPaidUntil = new Date(current + 30 * 24 * 60 * 60 * 1000).toISOString();
+
+    await database.query(
+      "insert into used_payments (tx_hash, user_id, pay_chain, asset, amount) values ($1, $2, $3, $4, $5) on conflict do nothing",
+      [dispute.tx_hash.toLowerCase(), dispute.user_id, dispute.chain, "MANUAL_APPROVAL", "20.00"],
+    );
+    await database.query(
+      "update member_access set paid_until = $1, last_tx = $2 where user_id = $3",
+      [newPaidUntil, dispute.tx_hash, dispute.user_id],
+    );
+    await database.query(
+      "update payment_disputes set status = 'accepted', admin_note = $1, resolved_at = now() where id = $2",
+      [note, disputeId],
+    );
+
+    const userChatId = Number(dispute.user_id);
+    if (userChatId) {
+      await send(
+        userChatId,
+        [
+          `🎉 Your payment dispute #${disputeId} has been ACCEPTED by the admin!`,
+          `Transaction: ${dispute.tx_hash}`,
+          `Access extended by 30 days.`,
+          `Active until: ${new Date(newPaidUntil).toUTCString()}`,
+          "You can now tap Add key and Add token.",
+        ].join("\n"),
+      ).catch(() => {});
+    }
+
+    return `✅ Dispute #${disputeId} ACCEPTED. 30 days credited to user ${dispute.user_id}.`;
+  } else {
+    await database.query(
+      "update payment_disputes set status = 'rejected', admin_note = $1, resolved_at = now() where id = $2",
+      [note, disputeId],
+    );
+
+    const userChatId = Number(dispute.user_id);
+    if (userChatId) {
+      await send(
+        userChatId,
+        [
+          `❌ Your payment dispute #${disputeId} was REJECTED by the admin.`,
+          `Transaction: ${dispute.tx_hash}`,
+          `Reason: ${note}`,
+        ].join("\n"),
+      ).catch(() => {});
+    }
+
+    return `❌ Dispute #${disputeId} REJECTED.`;
+  }
+}
+
+async function listDisputes() {
+  const database = await db();
+  if (!database) return "Database not connected.";
+  const res = await database.query(
+    "select id, user_id, tx_hash, chain, user_note, status, created_at from payment_disputes where status = 'pending' order by created_at desc limit 10",
+  );
+  if (!res.rows.length) return "No pending disputes at this time.";
+  return [
+    `Pending Disputes (${res.rows.length}):`,
+    "",
+    ...res.rows.map((d) => `• #${d.id} | User: ${d.user_id} | ${d.chain.toUpperCase()} | Tx: ${d.tx_hash.slice(0, 10)}…\n  Note: ${d.user_note || "None"}\n  To resolve: /accept ${d.id} or /reject ${d.id}`),
   ].join("\n");
 }
 
@@ -258,16 +413,16 @@ async function verifyPayment(userId, txHash) {
   let chainName = isSolana ? "solana" : "base";
   try {
     if (isSolana) {
-      verdict = await lookupPayment("solana", cleanHash, access.memo);
+      verdict = await lookupPayment("solana", cleanHash);
     } else {
-      verdict = await lookupPayment("base", cleanHash, access.memo);
+      verdict = await lookupPayment("base", cleanHash);
       if (!verdict.ok && (verdict.error.includes("not found") || verdict.error.includes("did not send"))) {
-        const bscVerdict = await lookupPayment("bsc", cleanHash, access.memo);
+        const bscVerdict = await lookupPayment("bsc", cleanHash);
         if (bscVerdict.ok || !bscVerdict.error.includes("not found")) {
           verdict = bscVerdict;
           chainName = "bsc";
         } else {
-          const rhVerdict = await lookupPayment("robinhood", cleanHash, access.memo);
+          const rhVerdict = await lookupPayment("robinhood", cleanHash);
           if (rhVerdict.ok || !rhVerdict.error.includes("not found")) {
             verdict = rhVerdict;
             chainName = "robinhood";
@@ -276,11 +431,31 @@ async function verifyPayment(userId, txHash) {
       }
     }
   } catch (error) {
-    return `Payment check failed: ${error instanceof Error ? error.message : "Error contacting chain RPC."}`;
+    return {
+      text: [
+        `Payment check failed: ${error instanceof Error ? error.message : "Error contacting chain RPC."}`,
+        "",
+        "If you already sent funds, you can raise a dispute to send it to the admin portal:",
+        `/dispute ${cleanHash}`,
+      ].join("\n"),
+      reply_markup: {
+        inline_keyboard: [[{ text: "⚠️ Raise Dispute to Admin", callback_data: `dispute:raise:${cleanHash}` }]],
+      },
+    };
   }
 
   if (!verdict.ok) {
-    return `Payment rejected: ${verdict.error}`;
+    return {
+      text: [
+        `Payment rejected: ${verdict.error}`,
+        "",
+        "If you already sent funds and believe this is an error, you can raise a dispute to send it to the admin portal for verification:",
+        `/dispute ${cleanHash}`,
+      ].join("\n"),
+      reply_markup: {
+        inline_keyboard: [[{ text: "⚠️ Raise Dispute to Admin", callback_data: `dispute:raise:${cleanHash}` }]],
+      },
+    };
   }
 
   const currentPaid = access.paid_until && new Date(access.paid_until).getTime() > Date.now()
@@ -317,14 +492,13 @@ async function savedLines(userId) {
   const tokens = await database.query("select chain, token, symbol from tg_tokens where user_id = $1 order by chain", [userId]);
 
   if (!wallets.rows.length && !tokens.rows.length) {
-    const memoLine = access?.memo ? `Your payment memo: ${access.memo} (send /pay for details).` : "";
-    return ["No wallet is saved for this Telegram account yet. Tap Add key.", memoLine].filter(Boolean).join("\n");
+    return "No wallet is saved for this Telegram account yet. Send /pay to activate, then tap Add key.";
   }
 
   const statusLine = settings.paused ? "Paused." : "Running on its own.";
   const accessLine = isPaid
     ? `Access: Active until ${new Date(access.paid_until).toUTCString()}.`
-    : `Access: Unpaid or expired. Send /pay to activate ($20/30 days, Memo: ${access?.memo || ""}).`;
+    : "Access: Unpaid or expired. Send /pay to activate ($20/30 days).";
 
   const intervalLine = `Interval: ${settings.interval || "30m"}. Size rotates: $5, $8, $6, $7, $7.50, $9.`;
   const mins = Math.max(0, Math.ceil(((Number(settings.next_recheck_ms) || 0) - Date.now()) / 60000));
@@ -408,6 +582,7 @@ async function setupBotMenu() {
     { command: "addtoken", description: "Add token coin address" },
     { command: "removekey", description: "Remove saved wallet and tokens" },
     { command: "pay", description: "Pay for access ($20/30 days)" },
+    { command: "dispute", description: "Raise transaction dispute for admin review" },
     { command: "help", description: "How to use Inactivity Trade" },
   ];
   for (let attempt = 1; attempt <= 5; attempt++) {
@@ -482,7 +657,8 @@ function helpText() {
     "Add key: Store your fresh wallet private key (AES-256 sealed).",
     "Add token: Add a coin contract address (up to 3 tokens).",
     "Remove key: Clear your saved wallets and tokens.",
-    "Pay: Access is at least $20/30 days USDT/USDC on Solana/Base/BNB or USDG on Robinhood.",
+    "Pay: Access is at least $20/30 days USDT, USDC, or USDG on Solana, Base, BNB, or Robinhood (no memo required).",
+    "Dispute: If a transaction needs manual verification, send /dispute <txHash> to submit to admin.",
     "",
     "Everything stays in this chat. Tap buttons below or use the Menu button at the bottom left.",
   ].join("\n");
@@ -533,6 +709,18 @@ async function ownerReply(cmd, arg) {
     return intervalReply(admin, true, arg);
   }
   if (cmd === "/pay") return { text: await payInfoText(admin) };
+  if (cmd === "/disputes") return { text: await listDisputes() };
+  if (cmd === "/dispute") {
+    return {
+      text: [
+        "To raise a transaction dispute for admin review, send:",
+        "/dispute <tx_hash> <optional note>",
+        "",
+        "Example:",
+        "/dispute 0x123...456 sent $20 USDC without memo",
+      ].join("\n"),
+    };
+  }
   if (cmd === "/status" || cmd === "/balance" || cmd === "/tokeninfo" || cmd === "/token" || cmd === "/config") return { text: await ownerStatus() };
   if (cmd === "/help" || cmd === "/start") return { text: `Running on its own.\n\n${helpText()}` };
   return { text: helpText() };
@@ -660,6 +848,17 @@ async function guestCommand(chatId, userId, cmd, arg) {
     return intervalReply(userId, false, arg);
   }
   if (cmd === "/pay") return { text: await payInfoText(userId) };
+  if (cmd === "/dispute") {
+    return {
+      text: [
+        "To raise a transaction dispute for admin review, send:",
+        "/dispute <tx_hash> <optional note>",
+        "",
+        "Example:",
+        "/dispute 0x123...456 sent $20 USDC without memo",
+      ].join("\n"),
+    };
+  }
   if (cmd === "/addkey") return beginKey(chatId);
   if (cmd === "/addtoken") return beginToken(chatId);
   if (cmd === "/removekey") return { text: await removeKeys(userId) };
@@ -840,6 +1039,35 @@ while (true) {
             continue;
           }
 
+          if (data.startsWith("dispute:raise:")) {
+            const txHash = data.replace("dispute:raise:", "");
+            const res = await raiseDisputeEntry(userId, txHash, "Raised via button in chat");
+            await send(chatId, res.text);
+            continue;
+          }
+
+          if (data.startsWith("dispute:accept:")) {
+            if (!isAdmin) {
+              await send(chatId, "Only the admin can accept disputes.");
+              continue;
+            }
+            const disputeId = data.replace("dispute:accept:", "");
+            const resText = await resolveDisputeEntry(disputeId, "accept");
+            await send(chatId, resText);
+            continue;
+          }
+
+          if (data.startsWith("dispute:reject:")) {
+            if (!isAdmin) {
+              await send(chatId, "Only the admin can reject disputes.");
+              continue;
+            }
+            const disputeId = data.replace("dispute:reject:", "");
+            const resText = await resolveDisputeEntry(disputeId, "reject");
+            await send(chatId, resText);
+            continue;
+          }
+
           if (data === "action:cancel") {
             pending.delete(chatId);
             await send(chatId, "Cancelled.");
@@ -860,7 +1088,7 @@ while (true) {
       const waiting = pending.get(chatId);
       const mapped = BUTTONS[raw] ?? raw;
       try {
-        if (waiting && !BUTTONS[raw] && !mapped.startsWith("/status") && mapped !== "/cancel" && !mapped.startsWith("/add") && !mapped.startsWith("/remove") && !mapped.startsWith("/help") && !mapped.startsWith("/start") && !mapped.startsWith("/pay")) {
+        if (waiting && !BUTTONS[raw] && !mapped.startsWith("/status") && mapped !== "/cancel" && !mapped.startsWith("/add") && !mapped.startsWith("/remove") && !mapped.startsWith("/help") && !mapped.startsWith("/start") && !mapped.startsWith("/pay") && !mapped.startsWith("/dispute")) {
           if (waiting.step === "key") await hide(chatId, message.message_id);
           const pendingRes = await takePending(chatId, userId, raw);
           await send(chatId, pendingRes.text, pendingRes.reply_markup);
@@ -876,7 +1104,9 @@ while (true) {
         const isTxHash = (/^[1-9A-HJ-NP-Za-km-z]{64,128}$/.test(raw) || /^0x[0-9a-fA-F]{64}$/.test(raw)) && !mapped.startsWith("/");
         if (isTxHash) {
           const paymentResult = await verifyPayment(userId, raw);
-          await send(chatId, paymentResult);
+          const replyText = typeof paymentResult === "string" ? paymentResult : paymentResult.text;
+          const replyMarkup = paymentResult.reply_markup ?? null;
+          await send(chatId, replyText, replyMarkup);
           continue;
         }
 
@@ -884,7 +1114,9 @@ while (true) {
           const parts = mapped.split(/\s+/);
           const txArg = parts.length > 2 && /^(solana|base|bsc|robinhood)$/i.test(parts[1]) ? parts[2] : parts[1];
           const paymentResult = await verifyPayment(userId, txArg);
-          await send(chatId, paymentResult);
+          const replyText = typeof paymentResult === "string" ? paymentResult : paymentResult.text;
+          const replyMarkup = paymentResult.reply_markup ?? null;
+          await send(chatId, replyText, replyMarkup);
           continue;
         }
 
@@ -892,6 +1124,47 @@ while (true) {
         const cmd = mapped.split(/\s+/)[0]?.split("@")[0] ?? "";
         const arg = mapped.split(/\s+/)[1] ?? "";
         const isAdmin = admin && userId === admin;
+
+        if (cmd === "/dispute") {
+          const parts = raw.split(/\s+/);
+          const txArg = parts[1] ?? "";
+          const noteArg = parts.slice(2).join(" ");
+          if (!txArg) {
+            await send(
+              chatId,
+              [
+                "To raise a transaction dispute for admin review, send:",
+                "/dispute <tx_hash> <optional note>",
+                "",
+                "Example:",
+                "/dispute 0x123...456 sent $20 USDC without memo",
+              ].join("\n"),
+            );
+            continue;
+          }
+          const disputeRes = await raiseDisputeEntry(userId, txArg, noteArg);
+          await send(chatId, disputeRes.text);
+          continue;
+        }
+
+        if (isAdmin && cmd === "/disputes") {
+          const text = await listDisputes();
+          await send(chatId, text);
+          continue;
+        }
+
+        if (isAdmin && (cmd === "/accept" || cmd === "/reject")) {
+          const disputeId = arg.trim();
+          if (!disputeId) {
+            await send(chatId, `Usage: ${cmd} <dispute_id> [optional note]`);
+            continue;
+          }
+          const note = raw.split(/\s+/).slice(2).join(" ");
+          const action = cmd === "/accept" ? "accept" : "reject";
+          const resultText = await resolveDisputeEntry(disputeId, action, note);
+          await send(chatId, resultText);
+          continue;
+        }
 
         if (cmd === "/interval") {
           const reply = await intervalReply(userId, isAdmin, arg);

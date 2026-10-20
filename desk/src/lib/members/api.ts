@@ -38,7 +38,7 @@ export const confirmPayment = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator(
     z.object({
-      chain: z.enum(["solana", "base", "bsc"]),
+      chain: z.enum(["solana", "base", "bsc", "robinhood"]),
       txHash: z.string().min(32).max(140),
     }),
   )
@@ -47,9 +47,45 @@ export const confirmPayment = createServerFn({ method: "POST" })
     return desk.confirmPayment(context.userId, data.chain, data.txHash);
   });
 
+export const raiseDispute = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(
+    z.object({
+      chain: z.enum(["solana", "base", "bsc", "robinhood"]),
+      txHash: z.string().min(32).max(140),
+      userNote: z.string().max(500).optional(),
+    }),
+  )
+  .handler(async ({ data, context }) => {
+    const desk = await import("./desk.server");
+    return desk.createDispute(context.userId, data);
+  });
+
+export const getUserDisputes = createServerFn({ method: "GET" })
+  .middleware([authMiddleware])
+  .handler(async ({ context }) => {
+    const desk = await import("./desk.server");
+    return desk.loadUserDisputes(context.userId);
+  });
+
+export const resolveDispute = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(
+    z.object({
+      disputeId: z.string().min(4).max(60),
+      action: z.enum(["accept", "reject"]),
+      adminNote: z.string().max(500).optional(),
+    }),
+  )
+  .handler(async ({ data, context }) => {
+    const desk = await import("./desk.server");
+    return desk.resolveDispute(context.userId, data.disputeId, data.action, data.adminNote);
+  });
+
 export const operatorBoard = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
     const desk = await import("./desk.server");
     return desk.loadOperatorBoard(context.userId);
   });
+
