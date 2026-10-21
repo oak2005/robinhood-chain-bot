@@ -33,6 +33,7 @@ const quoterAbi = [
 const routerAbi = ["function execute(bytes commands, bytes[] inputs, uint256 deadline) payable"];
 const stateViewAbi = [
   "function getSlot0(bytes32 poolId) view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee)",
+  "function getLiquidity(bytes32 poolId) view returns (uint128 liquidity)",
 ];
 const decimalsAbi = ["function decimals() view returns (uint8)"];
 
@@ -125,9 +126,19 @@ function writeRecovery(value: Recovery, wallet?: string) {
   }
 }
 
-function clearRecovery(wallet?: string) {
+export function clearRecovery(wallet?: string) {
   try {
-    fs.unlinkSync(recoveryPath(wallet));
+    if (wallet) {
+      const p = recoveryPath(wallet);
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    }
+  } catch {
+    /* none */
+  }
+  try {
+    if (fs.existsSync(RECOVERY_PATH)) {
+      fs.unlinkSync(RECOVERY_PATH);
+    }
   } catch {
     /* none */
   }
@@ -158,32 +169,62 @@ function decodeInit(log: ethers.Log): V4Pool {
   };
 }
 
+const poolCache = new Map<string, { pool: V4Pool; ts: number }>();
+
 export async function findPool(token: string): Promise<V4Pool | null> {
+  const cacheKey = token.toLowerCase();
+  const cached = poolCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < 10 * 60 * 1000) {
+    return cached.pool;
+  }
+
   const latest = await provider.getBlockNumber();
   const topicToken = ethers.zeroPadValue(token, 32);
   const span = 9_000_000;
-  let bestBlock = -1;
-  let bestPool: V4Pool | null = null;
+  const candidatePools: V4Pool[] = [];
   for (let end = latest; end > latest - span * 5 && end > 0; end -= span) {
     const start = Math.max(0, end - span + 1);
     for (const topicIndex of [2, 3]) {
       const topics: Array<string | null> = [INIT_TOPIC, null, null, null];
       topics[topicIndex] = topicToken;
-      const logs = (await provider.getLogs({
-        address: POOL_MANAGER,
-        fromBlock: start,
-        toBlock: end,
-        topics,
-      })) as ethers.Log[];
-      for (const log of logs) {
-        if (log.blockNumber > bestBlock) {
-          bestBlock = log.blockNumber;
-          bestPool = decodeInit(log);
+      try {
+        const logs = (await provider.getLogs({
+          address: POOL_MANAGER,
+          fromBlock: start,
+          toBlock: end,
+          topics,
+        })) as ethers.Log[];
+        for (const log of logs) {
+          candidatePools.push(decodeInit(log));
         }
+      } catch {
+        /* skip log fetch error */
       }
     }
-    if (bestPool) return bestPool;
   }
+
+  if (candidatePools.length === 0) return null;
+  if (candidatePools.length === 1) {
+    poolCache.set(cacheKey, { pool: candidatePools[0], ts: Date.now() });
+    return candidatePools[0];
+  }
+
+  const stateView = new ethers.Contract(STATE_VIEW, stateViewAbi, provider);
+  let maxLiquidity = -1n;
+  let bestPool: V4Pool = candidatePools[0];
+
+  for (const pool of candidatePools) {
+    try {
+      const id = poolIdOf(pool);
+      const liq = (await stateView.getLiquidity(id)) as bigint;
+      if (liq > maxLiquidity) {
+        maxLiquidity = liq;
+        bestPool = pool;
+      }
+    } catch {}
+  }
+
+  poolCache.set(cacheKey, { pool: bestPool, ts: Date.now() });
   return bestPool;
 }
 
@@ -452,10 +493,15 @@ export async function previewChain(input: {
   if (!pool) return { text: `No Robinhood Chain pool found for ${input.symbol}.`, pool: null };
   const recovery = readRecovery(input.token, input.address);
   if (recovery) {
-    return {
-      text: `A sell is already open (${recovery.soldHash}). Next step is the buy only. No second sell.`,
-      pool,
-    };
+    const held = await balanceOf(recovery.other, input.address).catch(() => 0n);
+    if (held <= 0n) {
+      clearRecovery(input.address);
+    } else {
+      return {
+        text: `A sell is already open (${recovery.soldHash}). Next step is the buy only. No second sell.`,
+        pool,
+      };
+    }
   }
   const plan = await planSell(input.address, input, pool, input.cycleIndex);
   return { text: plan.text, pool };
@@ -477,7 +523,14 @@ export async function runChainCycle(input: {
     return skipped(`No Robinhood Chain pool found for ${input.symbol}. No swap sent.`, null, "soon");
   }
   const recovery = readRecovery(input.token, wallet.address);
-  if (recovery) return buyBack(wallet, input, pool, recovery, undefined, undefined, undefined, input.onBumpCycleIndex, input.cycleIndex);
+  if (recovery) {
+    const held = await balanceOf(recovery.other, wallet.address).catch(() => 0n);
+    if (held <= 0n) {
+      clearRecovery(wallet.address);
+    } else {
+      return buyBack(wallet, input, pool, recovery, undefined, undefined, undefined, input.onBumpCycleIndex, input.cycleIndex);
+    }
+  }
 
   let plan: Plan;
   try {
@@ -576,13 +629,12 @@ async function buyBack(
     const held = await balanceOf(recovery.other, wallet.address);
     const received = lotOf(recovery, held);
     if (received <= 0n) {
-      return {
-        text: `Sell ${soldHash} did not leave a token to buy back yet. It will try again by itself. No second sell.`,
+      clearRecovery(wallet.address);
+      return skipped(
+        `Previous sell ${soldHash} intermediate balance is zero (buyback settled or cleared). Resuming normal cycles.`,
         pool,
-        traded: false,
-        halt: true,
-        retry: "soon",
-      };
+        "interval",
+      );
     }
     const before = await balanceOf(input.token, wallet.address);
     const buyOut = await quote(pool, !sellingToken, received);

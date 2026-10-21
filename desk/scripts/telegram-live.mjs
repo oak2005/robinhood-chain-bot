@@ -6,7 +6,7 @@ import pg from "pg";
 import nacl from "tweetnacl";
 import { privateKeyToAddress } from "@stacks/transactions";
 import { lookupPayment } from "../src/lib/members/pay.ts";
-import { previewChain, runChainCycle } from "../src/lib/chain/cycle.ts";
+import { clearRecovery, previewChain, runChainCycle } from "../src/lib/chain/cycle.ts";
 import { readUnifiedWalletBalances } from "../src/lib/chain/balance-reader.ts";
 import { previewSolana, runSolanaCycle } from "../src/lib/chain/solana-cycle.ts";
 import { previewStacks, runStacksCycle } from "../src/lib/chain/stacks-cycle.ts";
@@ -913,22 +913,25 @@ async function ownerStatus() {
     const mins = Math.max(0, Math.ceil(((state.nextRecheck ?? 0) - Date.now()) / 60000));
     const when = mins <= 0 ? "Next swap is due." : `Next swap in about ${mins} min.`;
     const lines = ["Running on its own.", when, state.token?.symbol ?? "NASTY", state.token?.address ?? ""];
-    if (state.lastPreview) {
-      lines.push(state.lastPreview);
-    } else if (state.token?.address && state.pool) {
+    let previewText = "";
+    if (state.token?.address) {
       try {
         const preview = await previewChain({
           address: NASTY_WALLET,
           token: state.token.address,
           symbol: state.token.symbol ?? "NASTY",
           decimals: state.token.decimals ?? 18,
-          pool: state.pool,
+          pool: state.pool ?? null,
         });
-        if (preview?.text) lines.push(preview.text);
+        if (preview?.text) previewText = preview.text;
       } catch {
         /* fallback */
       }
     }
+    if (!previewText && state.lastPreview) {
+      previewText = state.lastPreview;
+    }
+    if (previewText) lines.push(previewText);
     return lines.filter(Boolean).join("\n");
   } catch {
     return "Running on its own. The swap clock could not be read.";
@@ -990,9 +993,10 @@ async function ownerReply(cmd, arg) {
     writeGate({ paused: true });
     return { text: "Paused. No new swap will start." };
   }
-  if (cmd === "/resume") {
+  if (cmd === "/resume" || cmd === "/clear_recovery") {
+    clearRecovery(NASTY_WALLET);
     writeGate({ paused: false });
-    return { text: "Running again. The next check can swap." };
+    return { text: "Running again. Recovery cleared and next check can swap." };
   }
   if (cmd === "/interval") {
     return intervalReply(admin, true, arg);
@@ -1105,7 +1109,7 @@ async function takePending(chatId, userId, text) {
   let symbol = "";
   if (state.chain === "robinhood" && /^0x[0-9a-fA-F]{40}$/.test(tokenText)) {
     try {
-      const provider = new ethers.JsonRpcProvider("https://rpc.robinhoodchain.com");
+      const provider = new ethers.JsonRpcProvider("https://rpc.mainnet.chain.robinhood.com", 4663, { staticNetwork: true });
       const erc20 = new ethers.Contract(tokenText, ["function symbol() view returns (string)"], provider);
       symbol = await Promise.race([erc20.symbol(), new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000))]);
     } catch {}

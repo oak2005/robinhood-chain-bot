@@ -102,7 +102,7 @@ const RPC: Record<PayChain, string> = {
   solana: "https://api.mainnet-beta.solana.com",
   base: "https://mainnet.base.org",
   bsc: "https://bsc-dataseed.binance.org",
-  robinhood: "https://rpc.robinhoodchain.com",
+  robinhood: "https://rpc.mainnet.chain.robinhood.com",
 };
 
 export async function lookupPayment(chain: PayChain, txHash: string, memo?: string): Promise<Verdict> {

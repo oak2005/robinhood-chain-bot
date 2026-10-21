@@ -3,7 +3,7 @@ import { Connection, PublicKey } from "@solana/web3.js";
 
 const SOLANA_RPC = process.env.SOLANA_RPC_URL || "https://api.mainnet.solana.com";
 const HIRO_API = "https://api.hiro.so";
-const ROBINHOOD_RPC = "https://rpc.robinhoodchain.com";
+const ROBINHOOD_RPC = process.env.ROBINHOOD_RPC_URL || "https://rpc.mainnet.chain.robinhood.com";
 
 const WSOL_MINT = "So11111111111111111111111111111111111111112";
 const STX_CONTRACT = "SP000000000000000000002Q6VF78.stx";
@@ -261,8 +261,8 @@ export async function readRobinhoodWalletBalances(
         contract.balanceOf(address),
         contract.decimals().catch(() => 18),
       ]);
-      decimals = dec;
-      tokenBal = ethers.formatUnits(raw, dec);
+      decimals = Number(dec);
+      tokenBal = ethers.formatUnits(raw, decimals);
     } catch {}
 
     const price = await fetchTokenPriceUsd(t.token);
