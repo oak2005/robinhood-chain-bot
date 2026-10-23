@@ -1,6 +1,13 @@
 name: trade
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/**"
+      - "src/**"
+      - "railway.json"
   schedule:
     - cron: "*/15 * * * *"
 permissions:
@@ -105,4 +112,26 @@ jobs:
           fi
           git commit -m "state [skip ci]"
           git push origin HEAD:main
+
+      - name: Arm the next cycle
+        if: success() || failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          for attempt in 1 2 3 4 5; do
+            waiting=$(gh run list --workflow trade.yml --limit 20 --json status --jq '[.[] | select(.status=="waiting")] | length')
+            if gh run list --workflow trade.yml --limit 20 --json status,createdAt --jq -e 'any(.[]; .status=="waiting" and ((now - (.createdAt | fromdateiso8601)) < 300))' >/dev/null; then
+              echo "already armed"
+              exit 0
+            fi
+            if gh workflow run trade.yml --ref main; then
+              echo "next cycle armed"
+              exit 0
+            fi
+            echo "dispatch failed, retry ${attempt}"
+            sleep 20
+          done
+          echo "could not arm the next cycle"
+          exit 1
 
