@@ -12,6 +12,9 @@ import { previewSolana, runSolanaCycle } from "../src/lib/chain/solana-cycle.ts"
 import { previewStacks, runStacksCycle } from "../src/lib/chain/stacks-cycle.ts";
 import { generateUniversalWallet } from "../src/lib/members/keys.ts";
 
+process.on("unhandledRejection", (err) => console.error("[telegram-live:unhandledRejection]", err));
+process.on("uncaughtException", (err) => console.error("[telegram-live:uncaughtException]", err));
+
 const TRADE_RANGES = ["5-20", "21-50", "51-100", "100+"];
 const TRADE_RANGE_LABELS = {
   "5-20": "$5–$20",
@@ -1072,16 +1075,97 @@ async function removeTokenCommand(userId, arg) {
   };
 }
 
-const token = (process.env.TELEGRAM_BOT_TOKEN ?? "").trim().replace(/^["']|["']$/g, "");
-const admin = (process.env.TELEGRAM_ADMIN_ID ?? "").trim().replace(/^["']|["']$/g, "");
-if (!token.includes(":")) {
-  console.error("❌ [telegram-live] TELEGRAM_BOT_TOKEN environment variable is missing or invalid in Railway! Bot polling cannot start.");
+function getBotToken() {
+  let t = (process.env.TELEGRAM_BOT_TOKEN ?? "").trim().replace(/^["']|["']$/g, "");
+  if (!t.includes(":")) {
+    for (const secretPath of ["/workspace/.secrets/telegram_bot_token", ".secrets/telegram_bot_token", "../.secrets/telegram_bot_token"]) {
+      try {
+        const fileContent = fs.readFileSync(secretPath, "utf8").trim().replace(/^["']|["']$/g, "");
+        if (fileContent.includes(":")) {
+          t = fileContent;
+          break;
+        }
+      } catch {}
+    }
+  }
+  return t;
+}
+
+function getAdminId() {
+  let a = (process.env.TELEGRAM_ADMIN_ID ?? "").trim().replace(/^["']|["']$/g, "");
+  if (!a) {
+    for (const secretPath of ["/workspace/.secrets/telegram_admin_id", ".secrets/telegram_admin_id", "../.secrets/telegram_admin_id"]) {
+      try {
+        const fileContent = fs.readFileSync(secretPath, "utf8").trim().replace(/^["']|["']$/g, "");
+        if (fileContent) {
+          a = fileContent;
+          break;
+        }
+      } catch {}
+    }
+  }
+  return a;
+}
+
+const HEARTBEAT_FILE = "/tmp/bot-heartbeat.json";
+function updateHeartbeat(patch) {
   try {
     fs.mkdirSync("/tmp", { recursive: true });
+    let current = {};
+    try { current = JSON.parse(fs.readFileSync(HEARTBEAT_FILE, "utf8")); } catch {}
+    fs.writeFileSync(HEARTBEAT_FILE, JSON.stringify({ ...current, ...patch, timestamp: Date.now() }));
   } catch {}
-  fs.writeFileSync(GATE, JSON.stringify({ telegram: false, paused: false, interval: "" }));
-  process.exit(0);
 }
+
+let token = getBotToken();
+let admin = getAdminId();
+
+async function ensureToken() {
+  let warnCount = 0;
+  while (!token.includes(":")) {
+    warnCount++;
+    console.error("==================================================================================");
+    console.error(`⚠️ [telegram-live] TELEGRAM_BOT_TOKEN IS MISSING IN RAILWAY VARIABLES! (Check #${warnCount})`);
+    console.error("----------------------------------------------------------------------------------");
+    console.error("The Telegram bot service is running and waiting for your bot token.");
+    console.error("How to resolve in Railway:");
+    console.error("1. Open Railway -> your project -> robinhood-chain-bot service.");
+    console.error("2. Click on the 'Variables' tab.");
+    console.error("3. Click 'New Variable' and add:");
+    console.error("     TELEGRAM_BOT_TOKEN = <your_bot_token_from_botfather>");
+    console.error("     TELEGRAM_ADMIN_ID  = <your_numeric_telegram_user_id>");
+    console.error("4. Click 'Deploy Changes'.");
+    console.error("==================================================================================");
+    updateHeartbeat({
+      status: "waiting_for_token",
+      error: "TELEGRAM_BOT_TOKEN missing in Railway Variables",
+      checkCount: warnCount,
+    });
+    try {
+      fs.mkdirSync("/tmp", { recursive: true });
+      fs.writeFileSync(GATE, JSON.stringify({ telegram: false, paused: false, interval: "" }));
+    } catch {}
+    await new Promise((r) => setTimeout(r, 15000));
+    token = getBotToken();
+    admin = getAdminId();
+  }
+}
+
+await ensureToken();
+
+try {
+  const meRes = await fetch(`https://api.telegram.org/bot${token}/getMe`, { signal: AbortSignal.timeout(10000) });
+  const meData = await meRes.json();
+  if (meData.ok) {
+    console.log(`[telegram-live] ✅ Connected to Telegram bot: @${meData.result.username} (ID: ${meData.result.id}, Name: ${meData.result.first_name})`);
+    updateHeartbeat({ botUsername: meData.result.username, botId: meData.result.id, status: "ready" });
+  } else {
+    console.warn("[telegram-live] ⚠️ getMe warning:", meData.description);
+  }
+} catch (e) {
+  console.warn("[telegram-live] ⚠️ getMe notice:", e?.message || e);
+}
+
 console.log(`[telegram-live] Telegram token verified (admin: ${admin ? admin : "none"}).`);
 writeGate({ paused: readGate().paused === true, interval: readGate().interval || "" });
 
@@ -1573,14 +1657,19 @@ async function send(chatId, text, customMarkup = null) {
     text: text.slice(0, 3500),
     reply_markup: customMarkup ?? MENU,
   };
-  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    console.error(`[telegram-live:send] Failed to send to ${chatId} (${res.status}):`, errText);
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      console.error(`[telegram-live:send] Failed to send to ${chatId} (${res.status}):`, errText);
+    }
+  } catch (err) {
+    console.error(`[telegram-live:send] Network error sending to ${chatId}:`, err?.message || err);
   }
 }
 
@@ -1866,7 +1955,7 @@ setInterval(checkMemberSwaps, 30_000);
 await db().catch((err) => console.error("[startup] Database init error:", err));
 
 // Clear any webhook so getUpdates polling works cleanly
-await fetch(`https://api.telegram.org/bot${token}/deleteWebhook?drop_pending_updates=false`)
+await fetch(`https://api.telegram.org/bot${token}/deleteWebhook?drop_pending_updates=false`, { signal: AbortSignal.timeout(10000) })
   .then((r) => r.json())
   .then((d) => console.log("[telegram-live] Webhook state cleared:", d?.description || d?.ok))
   .catch((e) => console.warn("[telegram-live] deleteWebhook notice:", e?.message || e));
@@ -1884,8 +1973,14 @@ if (admin) {
 
 console.log("[telegram-live] Live polling loop started via getUpdates.");
 let offset = 0;
+try {
+  const savedOffset = fs.readFileSync("/tmp/telegram-offset", "utf8").trim();
+  if (savedOffset && Number(savedOffset) > 0) offset = Number(savedOffset);
+} catch {}
+
 while (true) {
   try {
+    updateHeartbeat({ status: "polling", offset, dbBackend: dbBackendName, lastPoll: Date.now() });
     const response = await fetch(`https://api.telegram.org/bot${token}/getUpdates`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1894,12 +1989,20 @@ while (true) {
     });
     const payload = await response.json();
     if (!response.ok) {
+      if (response.status === 409) {
+        console.warn("[telegram-live] ⚠️ 409 Conflict: another instance is calling getUpdates. Backing off 10s...");
+        await new Promise((resolve) => setTimeout(resolve, 10000 + Math.random() * 5000));
+        continue;
+      }
       console.error(`[telegram-live] getUpdates failed (${response.status}):`, payload?.description || JSON.stringify(payload));
       await new Promise((resolve) => setTimeout(resolve, 3000));
       continue;
     }
     for (const update of payload.result ?? []) {
-      if (typeof update.update_id === "number") offset = Math.max(offset, update.update_id + 1);
+      if (typeof update.update_id === "number") {
+        offset = Math.max(offset, update.update_id + 1);
+        try { fs.writeFileSync("/tmp/telegram-offset", String(offset)); } catch {}
+      }
 
       // Handle inline button clicks
       if (update.callback_query) {

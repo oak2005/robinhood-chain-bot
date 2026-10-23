@@ -11,7 +11,7 @@
     "build": "node scripts/with-app-env.mjs vite build",
     "db:migrate": "node scripts/migrate.mjs",
     "build:dev": "node scripts/with-app-env.mjs vite build --mode development",
-    "start": "node scripts/migrate.mjs; node scripts/telegram-live.mjs & node scripts/with-app-env.mjs vite preview --host 0.0.0.0 --port ${PORT:-8080}",
+    "start": "node scripts/start-service.mjs",
     "preview:restart": "node scripts/preview.mjs restart",
     "preview:stop": "node scripts/preview.mjs stop",
     "typecheck": "tsc --noEmit",

@@ -298,7 +298,8 @@ try {
   if (secretToken) await setupBotMenu(secretToken);
 } catch {}
 
-await (process.env.STILLMARK_SKIP_DRAIN === "1" ? Promise.resolve() : drainCommands().catch(() => undefined));
+// Telegram commands are handled live 24/7 by telegram-live.mjs on Railway.
+// drainCommands is disabled here to prevent getUpdates 409 conflicts.
 const line = await runDueTrade(true);
 try {
   const statePath = `${ROOT}/data/stillmark-bot.json`;
