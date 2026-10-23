@@ -1072,15 +1072,17 @@ async function removeTokenCommand(userId, arg) {
   };
 }
 
-const token = (process.env.TELEGRAM_BOT_TOKEN ?? "").trim();
-const admin = (process.env.TELEGRAM_ADMIN_ID ?? "").trim();
+const token = (process.env.TELEGRAM_BOT_TOKEN ?? "").trim().replace(/^["']|["']$/g, "");
+const admin = (process.env.TELEGRAM_ADMIN_ID ?? "").trim().replace(/^["']|["']$/g, "");
 if (!token.includes(":")) {
+  console.error("❌ [telegram-live] TELEGRAM_BOT_TOKEN environment variable is missing or invalid in Railway! Bot polling cannot start.");
   try {
     fs.mkdirSync("/tmp", { recursive: true });
   } catch {}
   fs.writeFileSync(GATE, JSON.stringify({ telegram: false, paused: false, interval: "" }));
   process.exit(0);
 }
+console.log(`[telegram-live] Telegram token verified (admin: ${admin ? admin : "none"}).`);
 writeGate({ paused: readGate().paused === true, interval: readGate().interval || "" });
 
 function buildTradeInlineMarkup(text, tokenAddress, chain = "robinhood") {
@@ -1571,11 +1573,15 @@ async function send(chatId, text, customMarkup = null) {
     text: text.slice(0, 3500),
     reply_markup: customMarkup ?? MENU,
   };
-  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    console.error(`[telegram-live:send] Failed to send to ${chatId} (${res.status}):`, errText);
+  }
 }
 
 async function hide(chatId, messageId) {
@@ -1859,6 +1865,12 @@ setInterval(checkMemberSwaps, 30_000);
 // Initialize database eagerly on startup
 await db().catch((err) => console.error("[startup] Database init error:", err));
 
+// Clear any webhook so getUpdates polling works cleanly
+await fetch(`https://api.telegram.org/bot${token}/deleteWebhook?drop_pending_updates=false`)
+  .then((r) => r.json())
+  .then((d) => console.log("[telegram-live] Webhook state cleared:", d?.description || d?.ok))
+  .catch((e) => console.warn("[telegram-live] deleteWebhook notice:", e?.message || e));
+
 if (admin) {
   const adminChatId = Number(admin);
   if (adminChatId) {
@@ -1866,10 +1878,11 @@ if (admin) {
       adminChatId,
       `🟢 *Inactivity Trade Live Bot Online*\n\nDatabase: \`${dbBackendName || "Ready"}\`\nListening for commands and swap events.`,
       MENU,
-    ).catch(() => {});
+    ).catch((err) => console.error("[telegram-live] Failed to send admin startup message:", err));
   }
 }
 
+console.log("[telegram-live] Live polling loop started via getUpdates.");
 let offset = 0;
 while (true) {
   try {
@@ -1881,6 +1894,7 @@ while (true) {
     });
     const payload = await response.json();
     if (!response.ok) {
+      console.error(`[telegram-live] getUpdates failed (${response.status}):`, payload?.description || JSON.stringify(payload));
       await new Promise((resolve) => setTimeout(resolve, 3000));
       continue;
     }
@@ -1902,6 +1916,7 @@ while (true) {
         }).catch(() => {});
 
         if (!chatId || !userId) continue;
+        console.log(`[telegram-live] Button click from ${userId}: "${data}"`);
         const isAdmin = admin && userId === admin;
 
         try {
@@ -2054,6 +2069,7 @@ while (true) {
       if (!raw || !chatId || !userId) continue;
       const waiting = pending.get(chatId);
       const mapped = BUTTONS[raw] ?? raw;
+      console.log(`[telegram-live] Received message from ${userId}: "${raw}" (command: "${mapped}")`);
       try {
         if (waiting && !BUTTONS[raw] && !mapped.startsWith("/status") && mapped !== "/cancel" && !mapped.startsWith("/add") && !mapped.startsWith("/remove") && !mapped.startsWith("/help") && !mapped.startsWith("/start") && !mapped.startsWith("/pay") && !mapped.startsWith("/dispute")) {
           if (waiting.step === "key") await hide(chatId, message.message_id);
