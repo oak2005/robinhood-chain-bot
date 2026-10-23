@@ -217,6 +217,7 @@ export async function previewSolana(input: {
   symbol: string;
   decimals?: number;
   cycleIndex?: number;
+  tradeRange?: string;
 }): Promise<{ text: string }> {
   try {
     const balInfo = await readSolanaWalletBalances(input.address, [
@@ -239,7 +240,7 @@ export async function previewSolana(input: {
       lines.push("⚠️ Low SOL for transaction fees. Fund wallet with at least 0.005 SOL.");
     }
 
-    const picked = chooseTradeUsd(tokenUsd, input.cycleIndex ?? 0);
+    const picked = chooseTradeUsd(tokenUsd, input.cycleIndex ?? 0, input.tradeRange);
     if (!picked.ok) {
       lines.push(picked.text);
       return { text: lines.join("\n") };
@@ -284,6 +285,7 @@ export async function runSolanaCycle(input: {
   decimals?: number;
   walletAddress: string;
   cycleIndex?: number;
+  tradeRange?: string;
   onBumpCycleIndex?: (next: number) => Promise<void> | void;
 }): Promise<SolanaCycleResult> {
   let keypair: Keypair;
@@ -369,7 +371,7 @@ export async function runSolanaCycle(input: {
   }
 
   // 2. Select trade dollar size along the rotating ladder ($5, $8, $6, $7, $7.50, $9)
-  const picked = chooseTradeUsd(tokenUsd, input.cycleIndex ?? 0);
+  const picked = chooseTradeUsd(tokenUsd, input.cycleIndex ?? 0, input.tradeRange);
   if (!picked.ok) {
     return {
       text: picked.text,

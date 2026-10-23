@@ -15,6 +15,7 @@ export async function previewStacks(input: {
   token: string;
   symbol: string;
   cycleIndex?: number;
+  tradeRange?: string;
 }): Promise<{ text: string }> {
   try {
     const balInfo = await readStacksWalletBalances(input.address, [
@@ -36,7 +37,7 @@ export async function previewStacks(input: {
       lines.push("⚠️ Low STX for network fees. Fund wallet with at least 0.2 STX.");
     }
 
-    const picked = chooseTradeUsd(tokenUsd, input.cycleIndex ?? 0);
+    const picked = chooseTradeUsd(tokenUsd, input.cycleIndex ?? 0, input.tradeRange);
     if (!picked.ok) {
       lines.push(picked.text);
       return { text: lines.join("\n") };
@@ -59,6 +60,7 @@ export async function runStacksCycle(input: {
   symbol: string;
   walletAddress: string;
   cycleIndex?: number;
+  tradeRange?: string;
   onBumpCycleIndex?: (next: number) => Promise<void> | void;
 }): Promise<StacksCycleResult> {
   const hex = input.privateKey.trim().replace(/^0x/, "");
@@ -99,7 +101,7 @@ export async function runStacksCycle(input: {
     };
   }
 
-  const picked = chooseTradeUsd(tokenUsd, input.cycleIndex ?? 0);
+  const picked = chooseTradeUsd(tokenUsd, input.cycleIndex ?? 0, input.tradeRange);
   if (!picked.ok) {
     return {
       text: picked.text,

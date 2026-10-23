@@ -422,6 +422,7 @@ async function planSell(
   input: { token: string; symbol: string; decimals: number },
   pool: V4Pool,
   cycleIndex?: number,
+  tradeRange?: string,
 ): Promise<Plan> {
   const eth = await provider.getBalance(address);
   const need = await roundTripGasWei();
@@ -439,7 +440,7 @@ async function planSell(
     return idle(`Could not price ${input.symbol} in dollars. No swap sent.`, "soon");
   }
   const balanceUsd = Number(ethers.formatUnits(balance, input.decimals)) * mark.usdPerToken;
-  const picked = chooseTradeUsd(balanceUsd, cycleIndex ?? readCycleIndex());
+  const picked = chooseTradeUsd(balanceUsd, cycleIndex ?? readCycleIndex(), tradeRange);
   if (!picked.ok) return idle(picked.text, "interval");
 
   let amountIn = unitsForUsd(picked.clip.usd, mark.usdPerToken, input.decimals);
@@ -488,6 +489,7 @@ export async function previewChain(input: {
   decimals: number;
   pool: V4Pool | null;
   cycleIndex?: number;
+  tradeRange?: string;
 }): Promise<{ text: string; pool: V4Pool | null }> {
   const pool = input.pool ?? (await findPool(input.token));
   if (!pool) return { text: `No Robinhood Chain pool found for ${input.symbol}.`, pool: null };
@@ -503,7 +505,7 @@ export async function previewChain(input: {
       };
     }
   }
-  const plan = await planSell(input.address, input, pool, input.cycleIndex);
+  const plan = await planSell(input.address, input, pool, input.cycleIndex, input.tradeRange);
   return { text: plan.text, pool };
 }
 
@@ -514,6 +516,7 @@ export async function runChainCycle(input: {
   decimals: number;
   pool: V4Pool | null;
   cycleIndex?: number;
+  tradeRange?: string;
   walletAddress?: string;
   onBumpCycleIndex?: (next: number) => void;
 }): Promise<CycleResult> {
@@ -534,7 +537,7 @@ export async function runChainCycle(input: {
 
   let plan: Plan;
   try {
-    plan = await planSell(wallet.address, input, pool, input.cycleIndex);
+    plan = await planSell(wallet.address, input, pool, input.cycleIndex, input.tradeRange);
   } catch (error) {
     return skipped(`Could not check ${input.symbol}. ${brief(error)}\nNo swap sent.`, pool, "soon");
   }

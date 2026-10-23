@@ -10,6 +10,15 @@ import { clearRecovery, previewChain, runChainCycle } from "../src/lib/chain/cyc
 import { readUnifiedWalletBalances } from "../src/lib/chain/balance-reader.ts";
 import { previewSolana, runSolanaCycle } from "../src/lib/chain/solana-cycle.ts";
 import { previewStacks, runStacksCycle } from "../src/lib/chain/stacks-cycle.ts";
+import { generateUniversalWallet } from "../src/lib/members/keys.ts";
+
+const TRADE_RANGES = ["5-20", "21-50", "51-100", "100+"];
+const TRADE_RANGE_LABELS = {
+  "5-20": "$5–$20",
+  "21-50": "$21–$50",
+  "51-100": "$51–$100",
+  "100+": "$100+",
+};
 
 const GATE = "/tmp/trade-gate.json";
 const STATE_URL = "https://raw.githubusercontent.com/oak2005/robinhood-chain-bot/main/data/stillmark-bot.json";
@@ -159,11 +168,13 @@ async function db() {
       user_id text primary key,
       paused boolean not null default false,
       interval text not null default '30m',
+      trade_range text not null default '5-20',
       cycle_index int not null default 0,
       next_recheck_ms bigint not null default 0,
       last_trade_ms bigint not null default 0,
       last_trade_text text not null default ''
     )`);
+    await pool.query(`alter table member_settings add column if not exists trade_range text not null default '5-20'`);
     await pool.query(`create table if not exists payment_disputes (
       id text primary key,
       user_id text not null,
@@ -196,11 +207,11 @@ async function getOrCreateMemberAccess(userId) {
 
 async function getMemberSettings(userId) {
   const database = await db();
-  if (!database) return { paused: false, interval: "30m", cycle_index: 0, next_recheck_ms: 0, last_trade_text: "" };
+  if (!database) return { paused: false, interval: "30m", trade_range: "5-20", cycle_index: 0, next_recheck_ms: 0, last_trade_text: "" };
   const res = await database.query("select * from member_settings where user_id = $1", [userId]);
-  if (res.rows.length > 0) return res.rows[0];
+  if (res.rows.length > 0) return { trade_range: "5-20", ...res.rows[0] };
   await database.query("insert into member_settings (user_id) values ($1) on conflict do nothing", [userId]);
-  return { paused: false, interval: "30m", cycle_index: 0, next_recheck_ms: 0, last_trade_text: "" };
+  return { paused: false, interval: "30m", trade_range: "5-20", cycle_index: 0, next_recheck_ms: 0, last_trade_text: "" };
 }
 
 async function updateMemberSettings(userId, patch) {
@@ -209,16 +220,17 @@ async function updateMemberSettings(userId, patch) {
   const current = await getMemberSettings(userId);
   const next = { ...current, ...patch };
   await database.query(
-    `insert into member_settings (user_id, paused, interval, cycle_index, next_recheck_ms, last_trade_ms, last_trade_text)
-     values ($1, $2, $3, $4, $5, $6, $7)
+    `insert into member_settings (user_id, paused, interval, trade_range, cycle_index, next_recheck_ms, last_trade_ms, last_trade_text)
+     values ($1, $2, $3, $4, $5, $6, $7, $8)
      on conflict (user_id) do update set
        paused = excluded.paused,
        interval = excluded.interval,
+       trade_range = excluded.trade_range,
        cycle_index = excluded.cycle_index,
        next_recheck_ms = excluded.next_recheck_ms,
        last_trade_ms = excluded.last_trade_ms,
        last_trade_text = excluded.last_trade_text`,
-    [userId, next.paused, next.interval, next.cycle_index, next.next_recheck_ms, next.last_trade_ms, next.last_trade_text],
+    [userId, next.paused, next.interval, next.trade_range || "5-20", next.cycle_index, next.next_recheck_ms, next.last_trade_ms, next.last_trade_text],
   );
 }
 
@@ -504,7 +516,8 @@ async function savedLines(userId) {
     ? `Access: Active until ${new Date(access.paid_until).toUTCString()}.`
     : "Access: Unpaid or expired. Send /pay to activate ($20/30 days).";
 
-  const intervalLine = `Interval: ${settings.interval || "30m"}. Size rotates: $5, $8, $6, $7, $7.50, $9.`;
+  const rangeLabel = TRADE_RANGE_LABELS[settings.trade_range || "5-20"] || "$5–$20";
+  const intervalLine = `Interval: ${settings.interval || "30m"}. Trade Scope: ${rangeLabel} per swap.`;
   const mins = Math.max(0, Math.ceil(((Number(settings.next_recheck_ms) || 0) - Date.now()) / 60000));
   const when = settings.paused ? "Trading is paused." : mins <= 0 ? "Next swap is due." : `Next swap in about ${mins} min.`;
 
@@ -528,6 +541,7 @@ async function savedLines(userId) {
         decimals: 18,
         pool: null,
         cycleIndex: settings.cycle_index || 0,
+        tradeRange: settings.trade_range || "5-20",
       });
       if (preview?.text) lines.push(preview.text);
     } catch {}
@@ -542,6 +556,7 @@ async function savedLines(userId) {
         token: solToken.token,
         symbol: solToken.symbol || "SOL_TOKEN",
         cycleIndex: settings.cycle_index || 0,
+        tradeRange: settings.trade_range || "5-20",
       });
       if (preview?.text) lines.push(preview.text);
     } catch {}
@@ -556,6 +571,7 @@ async function savedLines(userId) {
         token: stxToken.token,
         symbol: stxToken.symbol || "STX_TOKEN",
         cycleIndex: settings.cycle_index || 0,
+        tradeRange: settings.trade_range || "5-20",
       });
       if (preview?.text) lines.push(preview.text);
     } catch {}
@@ -660,12 +676,15 @@ async function configReply(userId, isAdmin) {
   const mins = Math.max(0, Math.ceil(((Number(settings.next_recheck_ms) || 0) - Date.now()) / 60000));
   const when = isPaused ? "Trading is paused." : mins <= 0 ? "Next swap is due." : `Next swap in about ${mins} min.`;
 
+  const currentRange = settings.trade_range || "5-20";
+  const rangeLabel = TRADE_RANGE_LABELS[currentRange] || currentRange;
+
   const lines = [
     "⚙️ *Inactivity Trade Configuration*",
     "",
     `• Bot Status: ${isPaused ? "⏸️ Paused (No new swaps)" : "🟢 Active (Running on its own)"}`,
-    `• Interval: *${currentInterval}* quiet window`,
-    `• Rotating Size Ladder: $5 ➔ $8 ➔ $6 ➔ $7 ➔ $7.50 ➔ $9`,
+    `• Quiet Interval: *${currentInterval}* between cycles`,
+    `• Trade Scope: *${rangeLabel}* per swap clip (respects bag balance)`,
     `• Cycle Index: #${settings.cycle_index || 0}`,
     `• Swap Clock: ${when}`,
     `• Saved Wallets: ${wallets.rows.length}`,
@@ -679,7 +698,7 @@ async function configReply(userId, isAdmin) {
   }
 
   lines.push("");
-  lines.push("Tap below to adjust interval or pause/resume:");
+  lines.push("Tap below to adjust interval, trade scope, or pause/resume:");
 
   const keyboard = {
     inline_keyboard: [
@@ -688,6 +707,14 @@ async function configReply(userId, isAdmin) {
         { text: currentInterval === "20m" ? "✅ 20m" : "20m", callback_data: "interval:20m" },
         { text: currentInterval === "30m" ? "✅ 30m" : "30m", callback_data: "interval:30m" },
         { text: currentInterval === "1h" ? "✅ 1h" : "1h", callback_data: "interval:1h" },
+      ],
+      [
+        { text: currentRange === "5-20" ? "✅ $5–$20" : "$5–$20", callback_data: "range:5-20" },
+        { text: currentRange === "21-50" ? "✅ $21–$50" : "$21–$50", callback_data: "range:21-50" },
+      ],
+      [
+        { text: currentRange === "51-100" ? "✅ $51–$100" : "$51–$100", callback_data: "range:51-100" },
+        { text: currentRange === "100+" ? "✅ $100+" : "$100+", callback_data: "range:100+" },
       ],
       [
         isPaused
@@ -957,35 +984,118 @@ function helpText() {
 }
 
 async function intervalReply(userId, isAdmin, arg) {
+  const currentSettings = await getMemberSettings(userId);
+  const currentInterval = isAdmin ? (readGate().interval || "30m") : (currentSettings.interval || "30m");
+  const currentRange = currentSettings.trade_range || "5-20";
+
   if (!arg) {
-    const current = isAdmin ? (readGate().interval || "30m") : ((await getMemberSettings(userId)).interval || "30m");
     const keyboard = {
       inline_keyboard: [
         [
-          { text: "10 minutes", callback_data: "interval:10m" },
-          { text: "20 minutes", callback_data: "interval:20m" },
+          { text: currentInterval === "10m" ? "✅ 10m" : "10m", callback_data: "interval:10m" },
+          { text: currentInterval === "20m" ? "✅ 20m" : "20m", callback_data: "interval:20m" },
+          { text: currentInterval === "30m" ? "✅ 30m" : "30m", callback_data: "interval:30m" },
+          { text: currentInterval === "1h" ? "✅ 1h" : "1h", callback_data: "interval:1h" },
         ],
         [
-          { text: "30 minutes", callback_data: "interval:30m" },
-          { text: "1 hour", callback_data: "interval:1h" },
+          { text: currentRange === "5-20" ? "✅ $5–$20" : "$5–$20", callback_data: "range:5-20" },
+          { text: currentRange === "21-50" ? "✅ $21–$50" : "$21–$50", callback_data: "range:21-50" },
         ],
+        [
+          { text: currentRange === "51-100" ? "✅ $51–$100" : "$51–$100", callback_data: "range:51-100" },
+          { text: currentRange === "100+" ? "✅ $100+" : "$100+", callback_data: "range:100+" },
+        ],
+        [{ text: "🔄 Refresh Config", callback_data: "action:config" }],
       ],
     };
     return {
-      text: `Current interval is ${current}.\nTap a button below or send /interval 10m, 20m, 30m, or 1h:`,
+      text: [
+        "⚙️ *Trade Interval & Scope*",
+        "",
+        `⏱️ *Quiet Window:* \`${currentInterval}\` between swaps`,
+        `💲 *Trade Scope:* \`${TRADE_RANGE_LABELS[currentRange] || currentRange}\` per cycle`,
+        "",
+        "• Tap an *Interval* to change swap frequency.",
+        "• Tap a *Trade Scope* to select trade dollar bracket (optimizes low fee & spread while respecting wallet balance).",
+      ].join("\n"),
       reply_markup: keyboard,
     };
   }
-  if (!INTERVALS.includes(arg)) {
-    return { text: "Send /interval 10m, 20m, 30m, or 1h." };
+
+  const rangeVal = arg.startsWith("range:") ? arg.replace("range:", "") : arg;
+  if (TRADE_RANGES.includes(rangeVal)) {
+    await updateMemberSettings(userId, { trade_range: rangeVal });
+    return intervalReply(userId, isAdmin, null);
   }
-  if (isAdmin) {
-    writeGate({ interval: arg });
-    return { text: `Interval set to ${arg}.` };
-  } else {
-    await updateMemberSettings(userId, { interval: arg });
-    return { text: `Interval set to ${arg}.` };
+
+  const intVal = arg.startsWith("interval:") ? arg.replace("interval:", "") : arg;
+  if (INTERVALS.includes(intVal)) {
+    if (isAdmin) {
+      writeGate({ interval: intVal });
+    }
+    await updateMemberSettings(userId, { interval: intVal });
+    return intervalReply(userId, isAdmin, null);
   }
+
+  return { text: "Send /interval 10m, 20m, 30m, 1h or /range 5-20, 21-50, 51-100, 100+." };
+}
+
+async function generateWalletForUser(userId) {
+  const database = await db();
+  if (!database) return { text: "No database is connected yet. Please wait until the database is ready." };
+
+  const wallet = generateUniversalWallet();
+  const wrappedRh = seal(wallet.wallets.robinhood.privateKey);
+  const wrappedSol = seal(wallet.wallets.solana.privateKey);
+  const wrappedStx = seal(wallet.wallets.stacks.privateKey);
+
+  await database.query(
+    `insert into tg_wallets (user_id, chain, address, wrapped) values
+     ($1, 'robinhood', $2, $3),
+     ($1, 'solana', $4, $5),
+     ($1, 'stacks', $6, $7)
+     on conflict (user_id, chain) do update set address = excluded.address, wrapped = excluded.wrapped`,
+    [
+      userId,
+      wallet.wallets.robinhood.address,
+      wrappedRh,
+      wallet.wallets.solana.address,
+      wrappedSol,
+      wallet.wallets.stacks.address,
+      wrappedStx,
+    ],
+  );
+
+  return {
+    text: [
+      "✨ *Universal Multi-Chain Wallet Generated!*",
+      "",
+      "⚠️ *IMPORTANT: Save Your 12-Word Seed Phrase*",
+      `\`${wallet.mnemonic}\``,
+      "",
+      "📝 *Write this down somewhere safe now!* This seed phrase controls your funds on all 3 chains (Robinhood EVM, Solana, and Stacks).",
+      "",
+      "📥 *Your Multi-Chain Deposit Addresses:*",
+      `• *Robinhood Chain (EVM):*`,
+      `\`${wallet.wallets.robinhood.address}\``,
+      `• *Solana:*`,
+      `\`${wallet.wallets.solana.address}\``,
+      `• *Stacks:*`,
+      `\`${wallet.wallets.stacks.address}\``,
+      "",
+      "Your wallet is already saved. Deposit the tokens or gas you want to trade to these addresses.",
+      "Then tap *Add token* to choose which coin the bot will swap!",
+    ].join("\n"),
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "🪙 Add Token", callback_data: "action:addtoken" },
+          { text: "💰 Live Balances", callback_data: "action:balance" },
+        ],
+        [{ text: "⚙️ View Config", callback_data: "action:config" }],
+      ],
+    },
+  };
 }
 
 async function ownerReply(cmd, arg) {
@@ -998,7 +1108,7 @@ async function ownerReply(cmd, arg) {
     writeGate({ paused: false });
     return { text: "Running again. Recovery cleared and next check can swap." };
   }
-  if (cmd === "/interval") {
+  if (cmd === "/interval" || cmd === "/range" || cmd === "/scope") {
     return intervalReply(admin, true, arg);
   }
   if (cmd === "/pay") return { text: await payInfoText(admin) };
@@ -1024,19 +1134,22 @@ async function ownerReply(cmd, arg) {
 }
 
 async function beginKey(chatId) {
-  pending.set(chatId, { step: "chain-key" });
+  pending.set(chatId, { step: "wallet-choice" });
   const keyboard = {
     inline_keyboard: [
-      [
-        { text: "Solana", callback_data: "chain:solana" },
-        { text: "Stacks", callback_data: "chain:stacks" },
-        { text: "Robinhood", callback_data: "chain:robinhood" },
-      ],
+      [{ text: "✨ Generate Universal Wallet (12 Words)", callback_data: "action:genwallet" }],
+      [{ text: "🔑 Import Existing Private Key", callback_data: "action:importkey" }],
       [{ text: "Cancel", callback_data: "action:cancel" }],
     ],
   };
   return {
-    text: "Which chain? Tap a button or reply Solana, Stacks, or Robinhood. Use a fresh wallet, not the one already trading.",
+    text: [
+      "👛 *Wallet Setup Options*",
+      "",
+      "Choose an option:",
+      "• *Generate Universal Wallet*: Creates a single 12-word seed phrase supporting Solana, Robinhood EVM, and Stacks. Deposit addresses will be provided.",
+      "• *Import Existing Key*: Manually paste your own private key for a single chain.",
+    ].join("\n"),
     reply_markup: keyboard,
   };
 }
@@ -1073,6 +1186,29 @@ async function takePending(chatId, userId, text) {
   if (text === "/cancel" || text === "action:cancel") {
     pending.delete(chatId);
     return { text: "Cancelled." };
+  }
+  if (state.step === "wallet-choice") {
+    if (text === "action:genwallet" || text === "/genwallet") {
+      pending.delete(chatId);
+      return generateWalletForUser(userId);
+    }
+    if (text === "action:importkey" || text === "/importkey") {
+      state.step = "chain-key";
+      const keyboard = {
+        inline_keyboard: [
+          [
+            { text: "Solana", callback_data: "chain:solana" },
+            { text: "Stacks", callback_data: "chain:stacks" },
+            { text: "Robinhood", callback_data: "chain:robinhood" },
+          ],
+          [{ text: "Cancel", callback_data: "action:cancel" }],
+        ],
+      };
+      return {
+        text: "Which chain? Tap a button or reply Solana, Stacks, or Robinhood. Use a fresh wallet, not the one already trading.",
+        reply_markup: keyboard,
+      };
+    }
   }
   if (state.step === "chain-key" || state.step === "chain-token") {
     const chain = chainOf(text);
@@ -1152,8 +1288,11 @@ async function guestCommand(chatId, userId, cmd, arg) {
     await updateMemberSettings(userId, { paused: true });
     return { text: "Stopped your trading. Tap Resume to turn swaps back on." };
   }
-  if (cmd === "/interval") {
+  if (cmd === "/interval" || cmd === "/range" || cmd === "/scope") {
     return intervalReply(userId, false, arg);
+  }
+  if (cmd === "/genwallet") {
+    return generateWalletForUser(userId);
   }
   if (cmd === "/pay") return { text: await payInfoText(userId) };
   if (cmd === "/dispute") {
@@ -1261,6 +1400,7 @@ async function checkMemberSwaps() {
                 decimals: 18,
                 pool: null,
                 cycleIndex: settings.cycle_index || 0,
+                tradeRange: settings.trade_range || "5-20",
                 walletAddress: item.address,
                 onBumpCycleIndex: async (nextIdx) => {
                   await updateMemberSettings(userId, { cycle_index: nextIdx });
@@ -1334,6 +1474,7 @@ async function checkMemberSwaps() {
                 symbol: item.symbol || "SOL_TOKEN",
                 walletAddress: item.address,
                 cycleIndex: settings.cycle_index || 0,
+                tradeRange: settings.trade_range || "5-20",
                 onBumpCycleIndex: async (nextIdx) => {
                   await updateMemberSettings(userId, { cycle_index: nextIdx });
                 },
@@ -1406,6 +1547,7 @@ async function checkMemberSwaps() {
                 symbol: item.symbol || "STX_TOKEN",
                 walletAddress: item.address,
                 cycleIndex: settings.cycle_index || 0,
+                tradeRange: settings.trade_range || "5-20",
                 onBumpCycleIndex: async (nextIdx) => {
                   await updateMemberSettings(userId, { cycle_index: nextIdx });
                 },
@@ -1510,9 +1652,37 @@ while (true) {
         const isAdmin = admin && userId === admin;
 
         try {
-          if (data.startsWith("interval:")) {
-            const val = data.replace("interval:", "");
-            const reply = await intervalReply(userId, isAdmin, val);
+          if (data.startsWith("interval:") || data.startsWith("range:")) {
+            const reply = await intervalReply(userId, isAdmin, data);
+            await send(chatId, reply.text, reply.reply_markup);
+            continue;
+          }
+
+          if (data === "action:genwallet") {
+            pending.delete(chatId);
+            const reply = await generateWalletForUser(userId);
+            await send(chatId, reply.text, reply.reply_markup);
+            continue;
+          }
+
+          if (data === "action:importkey") {
+            pending.set(chatId, { step: "chain-key" });
+            const keyboard = {
+              inline_keyboard: [
+                [
+                  { text: "Solana", callback_data: "chain:solana" },
+                  { text: "Stacks", callback_data: "chain:stacks" },
+                  { text: "Robinhood", callback_data: "chain:robinhood" },
+                ],
+                [{ text: "Cancel", callback_data: "action:cancel" }],
+              ],
+            };
+            await send(chatId, "Which chain? Tap a button or reply Solana, Stacks, or Robinhood. Use a fresh wallet, not the one already trading.", keyboard);
+            continue;
+          }
+
+          if (data === "action:interval") {
+            const reply = await intervalReply(userId, isAdmin, null);
             await send(chatId, reply.text, reply.reply_markup);
             continue;
           }
@@ -1710,7 +1880,7 @@ while (true) {
           continue;
         }
 
-        if (cmd === "/interval") {
+        if (cmd === "/interval" || cmd === "/range" || cmd === "/scope") {
           const reply = await intervalReply(userId, isAdmin, arg);
           await send(chatId, reply.text, reply.reply_markup);
           continue;
