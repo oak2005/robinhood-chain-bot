@@ -722,9 +722,8 @@ async function balanceReply(userId) {
       text: [
         "💰 *Wallet & Token Balances*",
         "",
-        "⚠️ No database is connected yet.",
-        "The Railway service needs a valid DATABASE_URL variable.",
-        "Once set, your wallet balances will appear here.",
+        "⚠️ Local database is starting up.",
+        "Please try again in a moment.",
       ].join("\n"),
     };
   }
@@ -873,9 +872,8 @@ async function configReply(userId, isAdmin) {
       text: [
         "⚙️ *Trade Configuration*",
         "",
-        "⚠️ No database is connected yet.",
-        "The Railway service needs a valid DATABASE_URL variable.",
-        "Once set, your configuration will appear here.",
+        "⚠️ Local database is starting up.",
+        "Please try again in a moment.",
       ].join("\n"),
     };
   }
@@ -2044,11 +2042,7 @@ while (true) {
           }
         } catch (error) {
           const reason = error instanceof Error ? error.message : "Button action failed.";
-          if (reason.includes("password authentication failed") || reason.includes("ECONNREFUSED") || reason.includes("ETIMEDOUT")) {
-            await send(chatId, "⚠️ Database service connection error. Please verify the DATABASE_URL credentials in Railway.");
-          } else {
-            await send(chatId, reason.slice(0, 300));
-          }
+          await send(chatId, `⚠️ ${reason.slice(0, 300)}`);
         }
         continue;
       }
@@ -2162,11 +2156,7 @@ while (true) {
         await send(chatId, reply.text, reply.reply_markup);
       } catch (error) {
         const reason = error instanceof Error ? error.message : "That could not be saved.";
-        if (reason.includes("password authentication failed") || reason.includes("ECONNREFUSED") || reason.includes("ETIMEDOUT")) {
-          await send(chatId, "⚠️ Database service connection error. Please verify the DATABASE_URL credentials in Railway.");
-        } else {
-          await send(chatId, reason.slice(0, 300));
-        }
+        await send(chatId, `⚠️ ${reason.slice(0, 300)}`);
       }
     }
   } catch {

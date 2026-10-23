@@ -3,110 +3,118 @@ import pg from "pg";
 
 const url = process.argv[2] || process.env.DATABASE_URL;
 let pool;
+let isPglite = false;
 
-if (url) {
+if (url && (url.startsWith("postgres://") || url.startsWith("postgresql://"))) {
   pool = new pg.Pool({
     connectionString: url,
     ssl: url.includes("localhost") ? false : { rejectUnauthorized: false },
   });
 } else {
+  isPglite = true;
   const pglitePath = fs.existsSync("./data/pglite-data")
     ? "./data/pglite-data"
     : fs.existsSync("../data/pglite-data")
     ? "../data/pglite-data"
-    : null;
-  if (pglitePath) {
-    console.log(`\n📂 DATABASE_URL not set. Auditing local embedded database at ${pglitePath}...`);
-    const { PGlite } = await import("@electric-sql/pglite");
-    pool = new PGlite(pglitePath);
-    await pool.waitReady;
-  } else {
-    console.log("\n❌ Please provide your DATABASE_URL as an argument or environment variable, or run when local database exists.");
-    console.log("Usage: node scripts/check-members.mjs \"postgres://...\"\n");
-    process.exit(1);
-  }
+    : "./data/pglite-data";
+  try {
+    fs.mkdirSync(pglitePath, { recursive: true });
+  } catch {}
+  console.log(`\n📂 Using embedded local database at: ${pglitePath}`);
+  const { PGlite } = await import("@electric-sql/pglite");
+  pool = new PGlite(pglitePath);
+  await pool.waitReady;
 }
 
 async function run() {
   try {
-    console.log("\nConnecting to database...\n");
+    console.log("Connecting to database...\n");
 
-    // 1. Check users (Better Auth user table)
-    let userCount = 0;
+    // 1. Check Telegram Wallets (tg_wallets)
+    let tgWallets = [];
     try {
-      const res = await pool.query("SELECT COUNT(*) AS count FROM \"user\"");
-      userCount = Number(res.rows[0].count);
-    } catch {
-      // Table might not exist or be named differently
-    }
+      const res = await pool.query("SELECT user_id, chain, address FROM tg_wallets ORDER BY chain, user_id");
+      tgWallets = res.rows;
+    } catch {}
 
-    // 2. Check member_access
-    let accessCount = 0;
+    // 2. Check Telegram Tokens (tg_tokens)
+    let tgTokens = [];
+    try {
+      const res = await pool.query("SELECT user_id, chain, token, symbol FROM tg_tokens ORDER BY chain, user_id");
+      tgTokens = res.rows;
+    } catch {}
+
+    // 3. Check Telegram Member Access (member_access)
+    let tgAccess = [];
     let paidCount = 0;
     try {
-      const res = await pool.query(
-        "SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE paid_until > NOW()) AS paid FROM member_access"
-      );
-      accessCount = Number(res.rows[0].total);
-      paidCount = Number(res.rows[0].paid);
-    } catch {
-      // Table might not exist
-    }
+      const res = await pool.query("SELECT user_id, memo, paid_until, last_tx FROM member_access ORDER BY user_id");
+      tgAccess = res.rows;
+      paidCount = tgAccess.filter((a) => a.paid_until && new Date(a.paid_until).getTime() > Date.now()).length;
+    } catch {}
 
-    // 3. Check member_slots
+    // 4. Check Telegram Settings (member_settings)
+    let tgSettings = [];
+    try {
+      const res = await pool.query("SELECT user_id, paused, interval, trade_range FROM member_settings ORDER BY user_id");
+      tgSettings = res.rows;
+    } catch {}
+
+    // 5. Check Web App Slots (member_slots)
     let slotCount = 0;
-    let slots = [];
+    let webSlots = [];
     try {
       const res = await pool.query(
         "SELECT chain, address, token, symbol, interval, created_at FROM member_slots ORDER BY created_at DESC"
       );
       slotCount = res.rows.length;
-      slots = res.rows;
-    } catch {
-      // Table might not exist
-    }
+      webSlots = res.rows;
+    } catch {}
 
-    // 4. Check member_slot_vault (stored encrypted private keys)
-    let vaultKeyCount = 0;
+    // 6. Check Disputes (payment_disputes)
+    let disputeCount = 0;
     try {
-      const res = await pool.query("SELECT COUNT(*) AS count FROM member_slot_vault");
-      vaultKeyCount = Number(res.rows[0].count);
-    } catch {
-      // Table might not exist
-    }
-
-    // 5. Check legacy member_vault (if any)
-    let legacyVaultCount = 0;
-    try {
-      const res = await pool.query("SELECT COUNT(*) AS count FROM member_vault");
-      legacyVaultCount = Number(res.rows[0].count);
-    } catch {
-      // Table might not exist
-    }
+      const res = await pool.query("SELECT COUNT(*) AS count FROM payment_disputes WHERE status = 'pending'");
+      disputeCount = Number(res.rows[0]?.count || 0);
+    } catch {}
 
     console.log("=========================================");
-    console.log("        MEMBER & KEY AUDIT SUMMARY       ");
+    console.log("       INACTIVITY TRADE DATABASE AUDIT    ");
     console.log("=========================================");
-    console.log(`👤 Total Registered Users:        ${userCount || accessCount}`);
-    console.log(`💳 Members With Paid Subscriptions: ${paidCount}`);
-    console.log(`🎯 Active Trading Slots:           ${slotCount}`);
-    console.log(`🔑 Total Wallet Private Keys Stored: ${vaultKeyCount + legacyVaultCount}`);
+    console.log(`🗄️ Backend:                        ${isPglite ? "Embedded Local (PGlite)" : "PostgreSQL Server"}`);
+    console.log(`👤 Telegram Members Registered:   ${tgAccess.length}`);
+    console.log(`💳 Members With Active Access:     ${paidCount}`);
+    console.log(`👛 Telegram Saved Wallets:        ${tgWallets.length}`);
+    console.log(`🪙 Telegram Configured Tokens:     ${tgTokens.length}`);
+    console.log(`🌐 Web App Trading Slots:          ${slotCount}`);
+    console.log(`⚠️ Pending Payment Disputes:       ${disputeCount}`);
     console.log("=========================================\n");
 
-    if (slots.length > 0) {
-      console.log("Configured Wallet Addresses:");
-      slots.forEach((s, idx) => {
+    if (tgWallets.length > 0) {
+      console.log("Telegram Bot Saved Wallets:");
+      tgWallets.forEach((w, idx) => {
+        const tokensForUser = tgTokens.filter((t) => t.user_id === w.user_id && t.chain === w.chain);
+        const tokenStr = tokensForUser.map((t) => t.symbol || t.token.slice(0, 8)).join(", ") || "No tokens";
+        console.log(` ${idx + 1}. User [${w.user_id}] [${w.chain.toUpperCase()}]: ${w.address} (Tokens: ${tokenStr})`);
+      });
+      console.log("");
+    } else {
+      console.log("No Telegram member wallets saved yet.\n");
+    }
+
+    if (webSlots.length > 0) {
+      console.log("Web App Trading Slots:");
+      webSlots.forEach((s, idx) => {
         console.log(` ${idx + 1}. [${s.chain.toUpperCase()}] ${s.address} (Token: ${s.symbol || s.token}, Interval: ${s.interval})`);
       });
-      console.log("\n⚠️  IMPORTANT: Transfer funds away from these wallet addresses immediately!\n");
-    } else {
-      console.log("No wallet slots found in the database.\n");
+      console.log("");
     }
 
   } catch (err) {
     console.error("❌ Failed to query database:", err.message);
   } finally {
-    await pool.end();
+    if (pool.end) await pool.end();
+    else if (pool.close) await pool.close();
   }
 }
 
