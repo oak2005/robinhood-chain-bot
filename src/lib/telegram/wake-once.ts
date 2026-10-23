@@ -298,34 +298,37 @@ try {
   if (secretToken) await setupBotMenu(secretToken);
 } catch {}
 
-await (process.env.STILLMARK_SKIP_DRAIN === "1" ? Promise.resolve() : drainCommands().catch(() => undefined));
+// Telegram commands are handled live 24/7 by telegram-live.mjs on Railway.
+// drainCommands is disabled here to prevent getUpdates 409 conflicts.
 const line = await runDueTrade(true);
-try {
-  const statePath = `${ROOT}/data/stillmark-bot.json`;
-  if (fs.existsSync(statePath)) {
-    const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as BotState;
-    let address = "";
-    try {
-      const creds = JSON.parse(fs.readFileSync(`${ROOT}/.secrets/robinhood_creds.json`, "utf8")) as { address?: string };
-      address = creds.address ?? "";
-    } catch {
-      address = "";
+if (line && line !== "watching") {
+  try {
+    const statePath = `${ROOT}/data/stillmark-bot.json`;
+    if (fs.existsSync(statePath)) {
+      const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as BotState;
+      let address = "";
+      try {
+        const creds = JSON.parse(fs.readFileSync(`${ROOT}/.secrets/robinhood_creds.json`, "utf8")) as { address?: string };
+        address = creds.address ?? "";
+      } catch {
+        address = "";
+      }
+      if (state.token && address) {
+        const preview = await previewChain({
+          address,
+          token: state.token.address,
+          symbol: state.token.symbol,
+          decimals: state.token.decimals,
+          pool: state.pool ?? null,
+        });
+        if (preview.pool) state.pool = preview.pool;
+        state.lastPreview = preview.text;
+        fs.writeFileSync(statePath, JSON.stringify(state));
+      }
     }
-    if (state.token && address) {
-      const preview = await previewChain({
-        address,
-        token: state.token.address,
-        symbol: state.token.symbol,
-        decimals: state.token.decimals,
-        pool: state.pool ?? null,
-      });
-      if (preview.pool) state.pool = preview.pool;
-      state.lastPreview = preview.text;
-      fs.writeFileSync(statePath, JSON.stringify(state));
-    }
+  } catch {
+    /* keep going even if preview refresh fails */
   }
-} catch {
-  /* keep going even if preview refresh fails */
 }
 const text = line || "watching";
 try {
