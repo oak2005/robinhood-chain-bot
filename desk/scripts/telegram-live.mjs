@@ -134,87 +134,129 @@ function generateMemo() {
 
 let pool;
 let poolConnecting = null;
+let pgliteInstance = null;
 let lastDbErrTime = 0;
+let dbBackendName = "";
+
+async function initDbTables(client) {
+  await client.query(`create table if not exists tg_wallets (
+    user_id text not null,
+    chain text not null,
+    address text not null,
+    wrapped text not null,
+    primary key (user_id, chain)
+  )`);
+  await client.query(`create table if not exists tg_tokens (
+    id text primary key,
+    user_id text not null,
+    chain text not null,
+    token text not null,
+    symbol text not null default ''
+  )`);
+  await client.query(`create table if not exists member_access (
+    user_id text primary key,
+    memo text not null unique,
+    paid_until timestamptz,
+    last_tx text not null default ''
+  )`);
+  await client.query(`create table if not exists used_payments (
+    tx_hash text primary key,
+    user_id text not null,
+    pay_chain text not null,
+    asset text not null,
+    amount text not null
+  )`);
+  await client.query(`create table if not exists member_settings (
+    user_id text primary key,
+    paused boolean not null default false,
+    interval text not null default '30m',
+    trade_range text not null default '5-20',
+    cycle_index int not null default 0,
+    next_recheck_ms bigint not null default 0,
+    last_trade_ms bigint not null default 0,
+    last_trade_text text not null default ''
+  )`);
+  try {
+    await client.query(`alter table member_settings add column if not exists trade_range text not null default '5-20'`);
+  } catch {}
+  await client.query(`create table if not exists payment_disputes (
+    id text primary key,
+    user_id text not null,
+    tx_hash text not null,
+    chain text not null,
+    user_note text not null default '',
+    status text not null default 'pending',
+    admin_note text not null default '',
+    created_at timestamptz not null default now(),
+    resolved_at timestamptz
+  )`);
+}
+
+async function getPgliteFallback() {
+  if (pgliteInstance) return pgliteInstance;
+  try {
+    const { PGlite } = await import("@electric-sql/pglite");
+    const dataDir = process.env.RAILWAY_VOLUME_MOUNT_PATH
+      ? `${process.env.RAILWAY_VOLUME_MOUNT_PATH}/pglite-data`
+      : "./data/pglite-data";
+    try { fs.mkdirSync(dataDir, { recursive: true }); } catch {}
+    const instance = new PGlite(dataDir);
+    await instance.waitReady;
+    await initDbTables(instance);
+    pgliteInstance = instance;
+    dbBackendName = `Embedded PGLite (${dataDir})`;
+    console.log(`[db] ${dbBackendName} initialized successfully.`);
+    return pgliteInstance;
+  } catch (err) {
+    console.warn("[db] Disk PGLite initialization failed, falling back to in-memory PGLite:", err?.message || err);
+    const { PGlite } = await import("@electric-sql/pglite");
+    const instance = new PGlite();
+    await instance.waitReady;
+    await initDbTables(instance);
+    pgliteInstance = instance;
+    dbBackendName = "In-Memory PGLite";
+    console.log(`[db] ${dbBackendName} ready.`);
+    return pgliteInstance;
+  }
+}
 
 async function db() {
   const url = (process.env.DATABASE_URL ?? "").trim();
-  if (!url) return null;
   if (pool) return pool;
-  if (poolConnecting) return poolConnecting;
 
-  poolConnecting = (async () => {
+  // Try remote PostgreSQL first if configured
+  if (url && (url.startsWith("postgres://") || url.startsWith("postgresql://"))) {
+    if (poolConnecting) return await poolConnecting;
     try {
-      const p = new pg.Pool({
-        connectionString: url,
-        max: 4,
-        connectionTimeoutMillis: 5000,
-        ssl: url.includes("localhost") || url.includes("127.0.0.1") ? false : { rejectUnauthorized: false },
-      });
-      await p.query("select 1");
-      await p.query(`create table if not exists tg_wallets (
-        user_id text not null,
-        chain text not null,
-        address text not null,
-        wrapped text not null,
-        primary key (user_id, chain)
-      )`);
-      await p.query(`create table if not exists tg_tokens (
-        id text primary key,
-        user_id text not null,
-        chain text not null,
-        token text not null,
-        symbol text not null default ''
-      )`);
-      await p.query(`create table if not exists member_access (
-        user_id text primary key,
-        memo text not null unique,
-        paid_until timestamptz,
-        last_tx text not null default ''
-      )`);
-      await p.query(`create table if not exists used_payments (
-        tx_hash text primary key,
-        user_id text not null,
-        pay_chain text not null,
-        asset text not null,
-        amount text not null
-      )`);
-      await p.query(`create table if not exists member_settings (
-        user_id text primary key,
-        paused boolean not null default false,
-        interval text not null default '30m',
-        trade_range text not null default '5-20',
-        cycle_index int not null default 0,
-        next_recheck_ms bigint not null default 0,
-        last_trade_ms bigint not null default 0,
-        last_trade_text text not null default ''
-      )`);
-      await p.query(`alter table member_settings add column if not exists trade_range text not null default '5-20'`);
-      await p.query(`create table if not exists payment_disputes (
-        id text primary key,
-        user_id text not null,
-        tx_hash text not null,
-        chain text not null,
-        user_note text not null default '',
-        status text not null default 'pending',
-        admin_note text not null default '',
-        created_at timestamptz not null default now(),
-        resolved_at timestamptz
-      )`);
-      pool = p;
-      return pool;
+      poolConnecting = (async () => {
+        const p = new pg.Pool({
+          connectionString: url,
+          max: 4,
+          connectionTimeoutMillis: 5000,
+          ssl: url.includes("localhost") || url.includes("127.0.0.1") ? false : { rejectUnauthorized: false },
+        });
+        await p.query("select 1");
+        await initDbTables(p);
+        pool = p;
+        dbBackendName = "Remote PostgreSQL";
+        console.log("[db] Remote PostgreSQL connected successfully.");
+        return pool;
+      })();
+      const res = await poolConnecting;
+      poolConnecting = null;
+      return res;
     } catch (err) {
+      poolConnecting = null;
       const now = Date.now();
       if (now - lastDbErrTime > 30000) {
-        console.error("[db] Database initialization failed:", err?.message || err);
+        console.warn("[db] Remote PostgreSQL failed (" + (err?.message || err) + "). Falling back to resilient embedded database.");
         lastDbErrTime = now;
       }
-      return null;
-    } finally {
-      poolConnecting = null;
     }
-  })();
+  }
 
-  return poolConnecting;
+  // Resilient fallback: always returns a functional database instance
+  return await getPgliteFallback();
 }
 
 async function getOrCreateMemberAccess(userId) {
@@ -630,8 +672,8 @@ async function balanceReply(userId) {
   const isOwner = admin && userId === admin;
   const database = await db();
 
-  // Admin fallback: read directly from the public state file when no DB is configured
-  if (!database && isOwner) {
+  // Admin view: NASTY token balance + swap clock preview
+  if (isOwner) {
     const lines = ["💰 *Owner NASTY Balance*", ""];
     try {
       const response = await fetch(`${STATE_URL}?t=${Date.now()}`, { signal: AbortSignal.timeout(8000) });
@@ -641,9 +683,10 @@ async function balanceReply(userId) {
         const mins = Math.max(0, Math.ceil(((state.nextRecheck ?? 0) - Date.now()) / 60000));
         const when = mins <= 0 ? "Next swap is due." : `Next swap in about ${mins} min.`;
         lines.push(`🟢 Status: ${gate.paused ? "⏸️ Paused" : "Running on its own"}`);
-        lines.push(when);
+        lines.push(`⏱️ Swap Clock: ${when}`);
+        lines.push(`🗄️ Database: ${dbBackendName || "Connected"}`);
         if (state.token) {
-          lines.push(`Token: ${state.token.symbol} (${state.token.address})`);
+          lines.push(`🪙 Token: ${state.token.symbol} (${state.token.address})`);
         }
         lines.push("");
         // Live chain preview
@@ -668,8 +711,6 @@ async function balanceReply(userId) {
     } catch (err) {
       lines.push(`State fetch failed: ${err instanceof Error ? err.message : "Network error"}`);
     }
-    lines.push("");
-    lines.push("ℹ️ Member database (DATABASE_URL) is not connected — member data unavailable.");
     return {
       text: lines.join("\n"),
       reply_markup: { inline_keyboard: [[{ text: "🔄 Refresh", callback_data: "action:balance" }]] },
@@ -797,7 +838,7 @@ async function configReply(userId, isAdmin) {
       lines.push(lastPreview);
     }
     lines.push("");
-    lines.push("ℹ️ Member database (DATABASE_URL) not connected — member data unavailable.");
+    lines.push(`• Database: \`${dbBackendName || "Connected"}\``);
     lines.push("Tap below to adjust interval, trade scope, or pause/resume:");
 
     const keyboard = {
@@ -863,6 +904,7 @@ async function configReply(userId, isAdmin) {
     `• Swap Clock: ${when}`,
     `• Saved Wallets: ${wallets.rows.length}`,
     `• Saved Tokens: ${tokens.rows.length}/3`,
+    `• Database: \`${dbBackendName || "Connected"}\``,
   ];
 
   if (settings.last_trade_text) {
@@ -1815,6 +1857,20 @@ async function checkMemberSwaps() {
 }
 
 setInterval(checkMemberSwaps, 30_000);
+
+// Initialize database eagerly on startup
+await db().catch((err) => console.error("[startup] Database init error:", err));
+
+if (admin) {
+  const adminChatId = Number(admin);
+  if (adminChatId) {
+    await send(
+      adminChatId,
+      `🟢 *Inactivity Trade Live Bot Online*\n\nDatabase: \`${dbBackendName || "Ready"}\`\nListening for commands and swap events.`,
+      MENU,
+    ).catch(() => {});
+  }
+}
 
 let offset = 0;
 while (true) {

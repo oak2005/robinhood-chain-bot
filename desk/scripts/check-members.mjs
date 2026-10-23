@@ -1,17 +1,31 @@
+import fs from "node:fs";
 import pg from "pg";
 
 const url = process.argv[2] || process.env.DATABASE_URL;
+let pool;
 
-if (!url) {
-  console.log("\n❌ Please provide your DATABASE_URL as an argument or environment variable.");
-  console.log("Usage: node scripts/check-members.mjs \"postgres://...\"\n");
-  process.exit(1);
+if (url) {
+  pool = new pg.Pool({
+    connectionString: url,
+    ssl: url.includes("localhost") ? false : { rejectUnauthorized: false },
+  });
+} else {
+  const pglitePath = fs.existsSync("./data/pglite-data")
+    ? "./data/pglite-data"
+    : fs.existsSync("../data/pglite-data")
+    ? "../data/pglite-data"
+    : null;
+  if (pglitePath) {
+    console.log(`\n📂 DATABASE_URL not set. Auditing local embedded database at ${pglitePath}...`);
+    const { PGlite } = await import("@electric-sql/pglite");
+    pool = new PGlite(pglitePath);
+    await pool.waitReady;
+  } else {
+    console.log("\n❌ Please provide your DATABASE_URL as an argument or environment variable, or run when local database exists.");
+    console.log("Usage: node scripts/check-members.mjs \"postgres://...\"\n");
+    process.exit(1);
+  }
 }
-
-const pool = new pg.Pool({
-  connectionString: url,
-  ssl: url.includes("localhost") ? false : { rejectUnauthorized: false },
-});
 
 async function run() {
   try {

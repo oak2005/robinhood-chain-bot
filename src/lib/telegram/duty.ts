@@ -111,8 +111,8 @@ export async function setupBotMenu(token: string) {
 
 async function send(chatId: number, text: string, tokenAddress?: string) {
   const token = fs.readFileSync(TOKEN_PATH, "utf8").trim();
-  const sellMatch = text.match(/Sell\s*\n\s*(0x[0-9a-fA-F]{64})/);
-  const buyMatch = text.match(/Buy\s*\n\s*(0x[0-9a-fA-F]{64})/);
+  const sellMatch = text.match(/Sell(?:\s*\n\s*|[\s:]+)(0x[0-9a-fA-F]{64})/i);
+  const buyMatch = text.match(/Buy(?:\s*\n\s*|[\s:]+)(0x[0-9a-fA-F]{64})/i);
   const rows: Array<Array<{ text: string; url: string }>> = [];
   const txButtons: Array<{ text: string; url: string }> = [];
   if (sellMatch) {
@@ -132,7 +132,11 @@ async function send(chatId: number, text: string, tokenAddress?: string) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text: text.slice(0, 3500), reply_markup: replyMarkup }),
   });
-  if (!response.ok) throw new Error(`Telegram HTTP ${response.status}`);
+  if (!response.ok) {
+    const errBody = await response.text().catch(() => "");
+    console.error(`[duty:send] Telegram API error (${response.status}):`, errBody);
+    throw new Error(`Telegram HTTP ${response.status}: ${errBody}`);
+  }
 }
 
 function note(state: SavedState, title: string, detail: string) {
@@ -209,8 +213,8 @@ export async function runDueTrade(wait = false): Promise<string> {
         const admin = fs.readFileSync(ADMIN_PATH, "utf8").trim();
         const notificationText = traded ? text : `⚠️ ${state.token?.symbol || "Token"} cycle swap failed on Robinhood Chain.\n${text}`;
         if (admin) await send(Number(admin), notificationText, state.token?.address);
-      } catch {
-        /* chat can miss a note; the next window still runs */
+      } catch (sendErr) {
+        console.error("[duty:runDueTrade] Failed to send Telegram notification:", sendErr instanceof Error ? sendErr.message : sendErr);
       }
     }
     return head || "done";
