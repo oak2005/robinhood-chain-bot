@@ -2,6 +2,9 @@ import bs58 from "bs58";
 import { Wallet } from "ethers";
 import nacl from "tweetnacl";
 import { privateKeyToAddress } from "@stacks/transactions";
+import * as bip39 from "@scure/bip39";
+import { wordlist } from "@scure/bip39/wordlists/english.js";
+import { HDKey } from "@scure/bip32";
 
 export type DeskChain = "solana" | "stacks" | "robinhood";
 
@@ -9,8 +12,54 @@ const SOLANA_MINT = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const STACKS_TOKEN = /^(SP|SM)[0-9A-Z]+\.[A-Za-z0-9-]+$/;
 const EVM_TOKEN = /^0x[0-9a-fA-F]{40}$/;
 
+export interface UniversalWalletResult {
+  mnemonic: string;
+  wallets: {
+    solana: { address: string; privateKey: string };
+    robinhood: { address: string; privateKey: string };
+    stacks: { address: string; privateKey: string };
+  };
+}
+
+export function generateUniversalWallet(): UniversalWalletResult {
+  const mnemonic = bip39.generateMnemonic(wordlist, 128);
+  return deriveUniversalWallet(mnemonic);
+}
+
+export function deriveUniversalWallet(mnemonic: string): UniversalWalletResult {
+  const trimmed = mnemonic.trim();
+  const seed = bip39.mnemonicToSeedSync(trimmed);
+
+  // EVM / Robinhood
+  const evmWallet = Wallet.fromPhrase(trimmed);
+
+  // Solana (derive from 32-byte seed)
+  const solPair = nacl.sign.keyPair.fromSeed(seed.subarray(0, 32));
+  const solAddress = bs58.encode(solPair.publicKey);
+  const solSecret = bs58.encode(solPair.secretKey);
+
+  // Stacks (derive path m/44'/5757'/0'/0/0)
+  const hd = HDKey.fromMasterSeed(seed);
+  const stxChild = hd.derive("m/44'/5757'/0'/0/0");
+  const stxPrivateKey = Buffer.from(stxChild.privateKey!).toString("hex");
+  const stxAddress = privateKeyToAddress(stxPrivateKey);
+
+  return {
+    mnemonic: trimmed,
+    wallets: {
+      solana: { address: solAddress, privateKey: solSecret },
+      robinhood: { address: evmWallet.address, privateKey: evmWallet.privateKey },
+      stacks: { address: stxAddress, privateKey: stxPrivateKey },
+    },
+  };
+}
+
 export function deriveWallet(chain: DeskChain, secret: string): { address: string } {
   const trimmed = secret.trim();
+  if (trimmed.split(/\s+/).length >= 12) {
+    const universal = deriveUniversalWallet(trimmed);
+    return { address: universal.wallets[chain].address };
+  }
   if (chain === "solana") return { address: solanaAddress(trimmed) };
   if (chain === "robinhood") return { address: robinhoodAddress(trimmed) };
   return { address: stacksAddress(trimmed) };
@@ -31,7 +80,7 @@ export function normalToken(chain: DeskChain, token: string): string {
 function robinhoodAddress(secret: string): string {
   const hex = secret.startsWith("0x") ? secret : `0x${secret}`;
   if (!/^0x[0-9a-fA-F]{64}$/.test(hex)) {
-    throw new Error("Paste the Robinhood wallet private key, 64 hex characters. Do not paste a seed phrase.");
+    throw new Error("Paste the Robinhood wallet private key (64 hex characters) or a 12-word seed phrase.");
   }
   return new Wallet(hex).address;
 }
@@ -61,7 +110,7 @@ function stacksAddress(secret: string): string {
   const hex = secret.replace(/^0x/, "");
   const compressed = /^[0-9a-fA-F]{64}01$/i.test(hex);
   if (!/^[0-9a-fA-F]{64}$/.test(hex) && !compressed) {
-    throw new Error("Paste the Stacks private key, 64 hex characters. Do not paste a seed phrase.");
+    throw new Error("Paste the Stacks private key (64 hex characters) or a 12-word seed phrase.");
   }
   const address = privateKeyToAddress(hex);
   if (!address.startsWith("SP") && !address.startsWith("SM")) {

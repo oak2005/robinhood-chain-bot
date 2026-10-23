@@ -6,6 +6,7 @@ import { EmailAccess } from "@/components/desk/email-access";
 import {
   addSlot,
   confirmPayment,
+  createUniversalWallet,
   getAccess,
   getUserDisputes,
   operatorBoard,
@@ -20,10 +21,13 @@ import {
   MAX_TOKENS,
   PAY_EVM,
   PAY_SOLANA,
+  TRADE_RANGE_OPTIONS,
   type DisputeRow,
   type OperatorRow,
   type PublicAccess,
+  type TradeRange,
 } from "@/lib/members/public";
+import type { UniversalWalletResult } from "@/lib/members/keys";
 
 type Chain = "solana" | "stacks" | "robinhood";
 type PayChain = "solana" | "base" | "bsc" | "robinhood";
@@ -56,6 +60,11 @@ export function MemberDesk() {
   const [token, setToken] = useState("");
   const [symbol, setSymbol] = useState("");
   const [interval, setIntervalKey] = useState<Interval>("30m");
+  const [tradeRange, setTradeRange] = useState<TradeRange>("5-20");
+  const [walletMode, setWalletMode] = useState<"generate" | "import">("generate");
+  const [universalWallet, setUniversalWallet] = useState<UniversalWalletResult | null>(null);
+  const [generatingWallet, setGeneratingWallet] = useState(false);
+  const [copiedItem, setCopiedItem] = useState<string>("");
   const [privateKey, setPrivateKey] = useState("");
   const [freshAck, setFreshAck] = useState(false);
   const [payChain, setPayChain] = useState<PayChain>("solana");
@@ -164,21 +173,78 @@ export function MemberDesk() {
     }
   }
 
+  async function onGenerateWallet() {
+    setError("");
+    setGeneratingWallet(true);
+    try {
+      const wallet = await createUniversalWallet();
+      setUniversalWallet(wallet);
+      setPrivateKey(wallet.wallets[chain].privateKey);
+    } catch {
+      setError("Could not generate a wallet right now. You can also import an existing private key.");
+    } finally {
+      setGeneratingWallet(false);
+    }
+  }
+
+  function handleChainChange(newChain: Chain) {
+    setChain(newChain);
+    if (walletMode === "generate" && universalWallet) {
+      setPrivateKey(universalWallet.wallets[newChain].privateKey);
+    }
+  }
+
+  function copy(text: string, label: string) {
+    void navigator.clipboard.writeText(text);
+    setCopiedItem(label);
+    setTimeout(() => setCopiedItem(""), 2200);
+  }
+
   async function onAdd() {
     setError("");
     if (!freshAck) {
-      setError("Tick the fresh-wallet warning before the key is accepted.");
+      setError(
+        walletMode === "generate"
+          ? "Please confirm that you have saved your 12-word seed phrase."
+          : "Tick the fresh-wallet warning before the key is accepted.",
+      );
       return;
     }
+    const finalKey =
+      walletMode === "generate" && universalWallet
+        ? universalWallet.wallets[chain].privateKey
+        : privateKey.trim();
+
+    if (!finalKey) {
+      setError(
+        walletMode === "generate"
+          ? "Please click 'Generate Universal Wallet' first to create your addresses."
+          : "Please enter your wallet private key.",
+      );
+      return;
+    }
+
     setBusy(true);
     try {
-      const result = await addSlot({ data: { chain, privateKey, token, symbol, interval, freshAck: true } });
+      const result = await addSlot({
+        data: {
+          chain,
+          privateKey: finalKey,
+          token,
+          symbol,
+          interval,
+          tradeRange,
+          freshAck: true,
+        },
+      });
       if (!result.ok) {
         setError(result.error);
         return;
       }
       setAccess(result.access);
-      setPrivateKey("");
+      if (walletMode === "import") {
+        setPrivateKey("");
+      }
       setToken("");
       setFreshAck(false);
     } catch {
@@ -243,10 +309,27 @@ export function MemberDesk() {
             {access.slots.map((slot) => (
               <div key={slot.id} className="flex items-center justify-between gap-3 rounded-2xl border border-line bg-surface p-3">
                 <div>
-                  <p className="text-fg">{slot.symbol || NAMES[slot.chain]}</p>
-                  <p className="text-sm text-muted">{NAMES[slot.chain]} · {short(slot.address)} · {slot.interval}</p>
+                  <div className="flex items-center gap-2">
+                    <p className="font-medium text-fg">{slot.symbol || NAMES[slot.chain]}</p>
+                    <span className="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] text-muted font-medium">
+                      {NAMES[slot.chain]}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted mt-1">
+                    <span className="font-mono">{short(slot.address)}</span>
+                    <span>·</span>
+                    <span className="rounded bg-surface-2 px-1.5 py-0.5 text-fg">{slot.interval}</span>
+                    <span>·</span>
+                    <span className="rounded bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 font-medium text-emerald-400">
+                      ${slot.tradeRange || "5-20"} / trade
+                    </span>
+                  </div>
                 </div>
-                <button type="button" onClick={() => void onRemove(slot.id)} className="min-h-11 rounded-full border border-line px-3 text-sm text-fg">
+                <button
+                  type="button"
+                  onClick={() => void onRemove(slot.id)}
+                  className="min-h-11 rounded-full border border-line px-3 text-sm text-fg hover:border-danger hover:text-danger transition"
+                >
                   Remove
                 </button>
               </div>
@@ -265,31 +348,243 @@ export function MemberDesk() {
                 <legend className="text-sm text-muted">Chain</legend>
                 <div className="grid grid-cols-3 gap-2">
                   {CHAINS.map((item) => (
-                    <button key={item} type="button" onClick={() => setChain(item)} className={`min-h-11 rounded-2xl border px-2 text-sm ${chain === item ? "border-accent bg-accent text-accent-fg" : "border-line bg-surface text-fg"}`}>
+                    <button
+                      key={item}
+                      type="button"
+                      onClick={() => handleChainChange(item)}
+                      className={`min-h-11 rounded-2xl border px-2 text-sm font-medium transition ${
+                        chain === item
+                          ? "border-accent bg-accent text-accent-fg shadow-sm"
+                          : "border-line bg-surface text-fg hover:border-line/80"
+                      }`}
+                    >
                       {NAMES[item]}
                     </button>
                   ))}
                 </div>
               </fieldset>
-              <Field label={chain === "robinhood" ? "Token contract" : chain === "solana" ? "Token mint" : "Token contract"} value={token} onChange={setToken} placeholder={chain === "solana" ? "Mint address" : chain === "stacks" ? "SP….token-name" : "0x token"} />
+
+              <Field
+                label={chain === "robinhood" ? "Token contract" : chain === "solana" ? "Token mint" : "Token contract"}
+                value={token}
+                onChange={setToken}
+                placeholder={chain === "solana" ? "Mint address" : chain === "stacks" ? "SP….token-name" : "0x token"}
+              />
+
               <Field label="Symbol" value={symbol} onChange={setSymbol} placeholder="Optional" />
+
+              {/* Trade Scope / Interval per trade Range */}
+              <fieldset className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <legend className="text-sm text-muted">Interval per trade (Trade size scope)</legend>
+                  <span className="text-[11px] text-emerald-400 font-medium">Low fee & low spread</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {TRADE_RANGE_OPTIONS.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setTradeRange(item.id)}
+                      className={`p-3 rounded-2xl border text-left transition flex flex-col justify-between ${
+                        tradeRange === item.id
+                          ? "border-accent bg-accent text-accent-fg shadow-sm"
+                          : "border-line bg-surface text-fg hover:border-line/80"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between w-full">
+                        <span className="font-bold text-sm">{item.label}</span>
+                        {tradeRange === item.id ? (
+                          <span className="text-xs bg-accent-fg/20 text-accent-fg rounded-full px-1.5 py-0.2">✓</span>
+                        ) : null}
+                      </div>
+                      <span className={`text-[11px] mt-1 line-clamp-2 ${tradeRange === item.id ? "text-accent-fg/80" : "text-muted"}`}>
+                        {item.desc}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[11px] text-subtle">
+                  Trades in {TRADE_RANGE_OPTIONS.find((o) => o.id === tradeRange)?.range}. If wallet balance is lower, trades will automatically scale to your available balance.
+                </p>
+              </fieldset>
+
               <label className="block space-y-2">
-                <span className="text-sm text-muted">Quiet interval</span>
-                <select value={interval} onChange={(event) => setIntervalKey(event.target.value as Interval)} className="min-h-11 w-full rounded-2xl border border-line bg-surface px-3 text-fg">
+                <span className="text-sm text-muted">Quiet time interval (between cycles)</span>
+                <select
+                  value={interval}
+                  onChange={(event) => setIntervalKey(event.target.value as Interval)}
+                  className="min-h-11 w-full rounded-2xl border border-line bg-surface px-3 text-fg focus:outline-none focus:border-accent"
+                >
                   {INTERVALS.map((item) => (
                     <option key={item} value={item}>{item}</option>
                   ))}
                 </select>
               </label>
+
+              {/* Wallet Choice: Generate Multi-Chain Wallet OR Import Key */}
+              <div className="space-y-3 pt-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-muted font-medium">Wallet Setup</span>
+                  <div className="inline-flex rounded-xl border border-line p-0.5 bg-surface text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setWalletMode("generate")}
+                      className={`px-3 py-1 rounded-lg font-medium transition ${
+                        walletMode === "generate" ? "bg-accent text-accent-fg shadow-sm" : "text-muted hover:text-fg"
+                      }`}
+                    >
+                      ✨ Generate Wallet
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setWalletMode("import")}
+                      className={`px-3 py-1 rounded-lg font-medium transition ${
+                        walletMode === "import" ? "bg-accent text-accent-fg shadow-sm" : "text-muted hover:text-fg"
+                      }`}
+                    >
+                      🔑 Import Key
+                    </button>
+                  </div>
+                </div>
+
+                {walletMode === "generate" ? (
+                  <div className="space-y-3">
+                    {!universalWallet ? (
+                      <div className="rounded-3xl border border-dashed border-accent/40 bg-accent/5 p-5 text-center space-y-3">
+                        <div className="inline-flex size-10 items-center justify-center rounded-full bg-accent/10 text-accent text-lg">
+                          ✨
+                        </div>
+                        <div>
+                          <p className="font-semibold text-fg text-sm">Universal Multi-Chain Wallet</p>
+                          <p className="text-xs text-muted max-w-sm mx-auto mt-1">
+                            Generate a single 12-word seed phrase that gives you deposit addresses for Solana, Robinhood, and Stacks all at once. No private key exports required!
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void onGenerateWallet()}
+                          disabled={generatingWallet || busy}
+                          className="min-h-11 px-5 rounded-full bg-accent text-accent-fg text-sm font-semibold hover:opacity-90 transition inline-flex items-center gap-2 shadow-sm"
+                        >
+                          {generatingWallet ? "Generating..." : "🎲 Generate Universal Wallet"}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="space-y-3 rounded-3xl border border-line bg-surface p-4">
+                        {/* Seed Phrase Display */}
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-semibold text-fg flex items-center gap-1.5">
+                              <span>📝</span> Your 12-Word Recovery Seed Phrase
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => copy(universalWallet.mnemonic, "seed")}
+                              className="text-xs text-accent hover:underline font-medium"
+                            >
+                              {copiedItem === "seed" ? "✓ Copied!" : "Copy Words"}
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-3 gap-1.5 rounded-2xl bg-bg/70 p-3 border border-line/60">
+                            {universalWallet.mnemonic.split(" ").map((word, idx) => (
+                              <div key={idx} className="flex items-center gap-1 text-xs">
+                                <span className="text-[10px] text-subtle w-4 font-mono">{idx + 1}.</span>
+                                <span className="font-mono text-fg font-medium">{word}</span>
+                              </div>
+                            ))}
+                          </div>
+                          <p className="text-[11px] text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-xl p-2">
+                            ⚠️ <strong>Crucial:</strong> Save these 12 words in a safe offline place. This is your master backup. We do not store your seed phrase.
+                          </p>
+                        </div>
+
+                        {/* Deposit Addresses */}
+                        <div className="space-y-2 pt-2 border-t border-line/40">
+                          <p className="text-xs font-semibold text-subtle">Deposit Addresses For Your Wallet:</p>
+                          {(["solana", "robinhood", "stacks"] as const).map((c) => {
+                            const isCurrent = chain === c;
+                            const addr = universalWallet.wallets[c].address;
+                            return (
+                              <div
+                                key={c}
+                                className={`rounded-2xl p-2.5 transition text-xs border ${
+                                  isCurrent
+                                    ? "bg-accent/5 border-accent/40"
+                                    : "bg-bg/40 border-line/60"
+                                }`}
+                              >
+                                <div className="flex items-center justify-between mb-1">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="font-semibold text-fg">{NAMES[c]}</span>
+                                    {isCurrent ? (
+                                      <span className="rounded bg-accent text-accent-fg text-[10px] px-1.5 py-0.2 font-semibold">
+                                        Selected Chain
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => copy(addr, c)}
+                                    className="text-[11px] text-accent hover:underline font-medium"
+                                  >
+                                    {copiedItem === c ? "✓ Copied!" : "Copy Address"}
+                                  </button>
+                                </div>
+                                <p className="font-mono text-[11px] text-muted break-all select-all">{addr}</p>
+                              </div>
+                            );
+                          })}
+                          <p className="text-[11px] text-muted pt-1">
+                            💡 Send your trading token and a little gas to your <strong>{NAMES[chain]}</strong> address.
+                          </p>
+                        </div>
+
+                        <div className="flex justify-end pt-1">
+                          <button
+                            type="button"
+                            onClick={() => void onGenerateWallet()}
+                            className="text-xs text-subtle hover:text-fg transition"
+                          >
+                            🔄 Generate different wallet
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <label className="block space-y-2">
+                    <span className="text-sm text-muted">Private key</span>
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      placeholder="Paste private key (or 12-word seed phrase)"
+                      value={privateKey}
+                      onChange={(event) => setPrivateKey(event.target.value)}
+                      className="min-h-11 w-full rounded-2xl border border-line bg-surface px-3 text-fg placeholder:text-subtle focus:outline-none focus:border-accent"
+                    />
+                  </label>
+                )}
+              </div>
+
               <label className="flex gap-3 rounded-3xl border border-line bg-surface-2 p-4 text-sm text-fg">
-                <input type="checkbox" checked={freshAck} onChange={(event) => setFreshAck(event.target.checked)} className="mt-1 size-4" />
-                <span>This is a fresh wallet, not my main wallet. I will keep only the trading amount in it. Do not use the wallet that is already running, or the same coin will trade twice.</span>
+                <input
+                  type="checkbox"
+                  checked={freshAck}
+                  onChange={(event) => setFreshAck(event.target.checked)}
+                  className="mt-1 size-4 accent-accent"
+                />
+                <span>
+                  {walletMode === "generate"
+                    ? "I have written down and saved my 12-word recovery seed phrase. I will only deposit the trading amount into this address."
+                    : "This is a fresh wallet, not my main wallet. I will keep only the trading amount in it. Do not use the wallet that is already running."}
+                </span>
               </label>
-              <label className="block space-y-2">
-                <span className="text-sm text-muted">Private key</span>
-                <input type="password" autoComplete="off" value={privateKey} onChange={(event) => setPrivateKey(event.target.value)} className="min-h-11 w-full rounded-2xl border border-line bg-surface px-3 text-fg" />
-              </label>
-              <button type="submit" disabled={busy || !access.covered} className="min-h-11 w-full rounded-full bg-accent px-4 text-sm font-medium text-accent-fg disabled:opacity-60">
+
+              <button
+                type="submit"
+                disabled={busy || !access.covered}
+                className="min-h-11 w-full rounded-full bg-accent px-4 text-sm font-semibold text-accent-fg disabled:opacity-60 transition"
+              >
                 {access.covered ? "Add token" : "Pay the month first"}
               </button>
             </form>
@@ -476,12 +771,12 @@ function Guide() {
   return (
     <article className="mt-8 space-y-5 text-sm text-muted">
       <h2 className="font-display text-2xl text-fg">How this works</h2>
-      <p>Each account can run up to {MAX_TOKENS} different tokens. A token can be on Solana, Stacks, or Robinhood. After the quiet interval, that token sells one dollar clip and buys the same dollar amount back. It does not withdraw.</p>
-      <h2 className="font-display text-2xl text-fg">The calculations</h2>
-      <p>The clip rotates: {LADDER_USD.map((usd) => `$${usd.toFixed(2)}`).join(", ")}. Then it repeats. If the bag is smaller than the target, that cycle uses the bag. The quoted round trip is skipped when it is worse than {MAX_ROUND_TRIP_PCT}%. Gas is the network price, with no tip.</p>
-      <p>{"Access is $" + DONATION_USD + " or more for 30 days, in USDT, USDC, or USDG, on Solana, Base, BNB, or Robinhood Chain. No memo is required. A payment under $20 is rejected. If your wallet had an issue, you can raise a transaction dispute for admin verification."}</p>
-      <h2 className="font-display text-2xl text-fg">The key</h2>
-      <p>Use a fresh wallet. The key is sealed. The operator board shows the address, the token, and whether the month is paid. It does not load the key. Do not add the wallet that is already trading, or that coin will trade twice.</p>
+      <p>Each account can run up to {MAX_TOKENS} different tokens across Solana, Stacks, or Robinhood. After the quiet interval, that token sells one clip and buys the same dollar amount back to keep activity alive. It never withdraws your funds.</p>
+      <h2 className="font-display text-2xl text-fg">Interval per trade (Trade size scope)</h2>
+      <p>You can choose your trade size bracket: $5–$20, $21–$50, $51–$100, or $100+. The bot automatically searches for the lowest fee and spread within that scope while strictly respecting your available wallet balance. The quoted round trip is skipped when spread is worse than {MAX_ROUND_TRIP_PCT}%.</p>
+      <h2 className="font-display text-2xl text-fg">Universal Multi-Chain Wallet</h2>
+      <p>You can generate a single 12-word recovery seed phrase that creates deposit addresses for Solana, Robinhood, and Stacks all at once. Simply save your seed phrase offline, deposit tokens and gas into the generated address, and the bot handles the rest. Alternatively, you can import an existing private key.</p>
+      <p>{"Access is $" + DONATION_USD + " or more for 30 days, in USDT, USDC, or USDG, on Solana, Base, BNB, or Robinhood Chain. No memo is required."}</p>
     </article>
   );
 }

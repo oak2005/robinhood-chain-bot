@@ -9,7 +9,7 @@ const intervals = ["10m", "20m", "30m", "1h"] as const;
 const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 type AccessRow = { memo: string; paid_until: string | null };
-type SlotRow = { id: string; chain: string; address: string; token: string; symbol: string; interval: string };
+type SlotRow = { id: string; chain: string; address: string; token: string; symbol: string; interval: string; trade_range?: string };
 type DisputeDbRow = {
   id: string;
   user_id: string;
@@ -28,6 +28,7 @@ export type SlotInput = {
   token: string;
   symbol: string;
   interval: PublicSlot["interval"];
+  tradeRange?: PublicSlot["tradeRange"];
   freshAck: true;
 };
 
@@ -66,7 +67,11 @@ function newMemo(): string {
 function toSlot(row: SlotRow): PublicSlot {
   const chain = row.chain === "stacks" || row.chain === "robinhood" ? row.chain : "solana";
   const interval = intervals.includes(row.interval as PublicSlot["interval"]) ? (row.interval as PublicSlot["interval"]) : "30m";
-  return { id: row.id, chain, address: row.address, token: row.token, symbol: row.symbol, interval };
+  const tradeRange: PublicSlot["tradeRange"] =
+    row.trade_range === "21-50" || row.trade_range === "51-100" || row.trade_range === "100+"
+      ? row.trade_range
+      : "5-20";
+  return { id: row.id, chain, address: row.address, token: row.token, symbol: row.symbol, interval, tradeRange };
 }
 
 async function ensureAccess(userId: string): Promise<AccessRow> {
@@ -81,7 +86,7 @@ async function ensureAccess(userId: string): Promise<AccessRow> {
 async function slotsFor(userId: string): Promise<PublicSlot[]> {
   const sql = await getSql();
   const rows = await sql<SlotRow>`
-    select id, chain, address, token, symbol, interval
+    select id, chain, address, token, symbol, interval, coalesce(trade_range, '5-20') as trade_range
     from member_slots
     where user_id = ${userId}
     order by created_at asc
@@ -124,10 +129,14 @@ export async function addSlot(userId: string, data: SlotInput): Promise<{ ok: tr
     return { ok: false, error: error instanceof Error ? error.message : "The vault is not ready." };
   }
   const id = randomUUID();
+  const tradeRange: PublicSlot["tradeRange"] =
+    data.tradeRange === "21-50" || data.tradeRange === "51-100" || data.tradeRange === "100+"
+      ? data.tradeRange
+      : "5-20";
   const sql = await getSql();
   await sql`
-    insert into member_slots (id, user_id, chain, address, token, symbol, interval)
-    values (${id}, ${userId}, ${data.chain}, ${address}, ${token}, ${data.symbol.trim()}, ${data.interval})
+    insert into member_slots (id, user_id, chain, address, token, symbol, interval, trade_range)
+    values (${id}, ${userId}, ${data.chain}, ${address}, ${token}, ${data.symbol.trim()}, ${data.interval}, ${tradeRange})
   `;
   await sql`insert into member_slot_vault (slot_id, wrapped) values (${id}, ${wrapped})`;
   return { ok: true, access: await loadAccess(userId) };

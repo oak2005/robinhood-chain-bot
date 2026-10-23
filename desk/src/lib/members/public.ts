@@ -6,6 +6,15 @@ export const MAX_TOKENS = 3;
 export const PAY_EVM = "0x4a543eEbBB5DFaA2FE0E4f36E84b0eaf5803D7DD";
 export const PAY_SOLANA = "GLrFg8GR7iNotxJRvVHakdbhpRHjEEe8EHXVmjHxNG1T";
 
+export type TradeRange = "5-20" | "21-50" | "51-100" | "100+";
+
+export const TRADE_RANGE_OPTIONS: { id: TradeRange; label: string; desc: string; range: string }[] = [
+  { id: "5-20", label: "$5 – $20", desc: "Low fee & spread starter tier", range: "$5 – $20" },
+  { id: "21-50", label: "$21 – $50", desc: "Balanced growth and optimal spread", range: "$21 – $50" },
+  { id: "51-100", label: "$51 – $100", desc: "High volume tier for larger bags", range: "$51 – $100" },
+  { id: "100+", label: "$100+", desc: "Deep liquidity clip tier", range: "$100 – $250" },
+];
+
 export type PublicSlot = {
   id: string;
   chain: "solana" | "stacks" | "robinhood";
@@ -13,6 +22,7 @@ export type PublicSlot = {
   token: string;
   symbol: string;
   interval: "10m" | "20m" | "30m" | "1h";
+  tradeRange: TradeRange;
 };
 
 export type PublicAccess = {

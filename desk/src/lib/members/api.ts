@@ -8,8 +8,16 @@ const slotInput = z.object({
   token: z.string().min(8).max(140),
   symbol: z.string().max(16),
   interval: z.enum(["10m", "20m", "30m", "1h"]),
+  tradeRange: z.enum(["5-20", "21-50", "51-100", "100+"]).optional(),
   freshAck: z.literal(true),
 });
+
+export const createUniversalWallet = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .handler(async () => {
+    const { generateUniversalWallet } = await import("./keys");
+    return generateUniversalWallet();
+  });
 
 export const getAccess = createServerFn({ method: "GET" })
   .middleware([authMiddleware])

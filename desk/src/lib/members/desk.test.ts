@@ -3,11 +3,12 @@ import test from "node:test";
 import { randomPrivateKey } from "@stacks/transactions";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
-import { deriveWallet } from "./keys.ts";
+import { deriveWallet, generateUniversalWallet, deriveUniversalWallet } from "./keys.ts";
 import { Wallet } from "ethers";
 import { readEvmPayment, readSolanaPayment } from "./pay.ts";
 import { PAY_EVM, assertNoSecret, nextClip } from "./public.ts";
 import { openSecret, sealSecret } from "./seal.ts";
+import { chooseTradeUsd } from "../chain/size.ts";
 
 test("solana address comes from the key and the secret is not the address", () => {
   const pair = nacl.sign.keyPair();
@@ -123,4 +124,77 @@ test("sealed key round-trips and operator payloads have no secret field", () => 
 
 test("clip ladder rotates", () => {
   assert.deepEqual([0, 1, 2, 3, 4, 5, 6].map(nextClip), [5, 8, 6, 7, 7.5, 9, 5]);
+});
+
+test("universal wallet generates 12-word seed and valid addresses for all chains", () => {
+  const generated = generateUniversalWallet();
+  const words = generated.mnemonic.split(" ");
+  assert.equal(words.length, 12);
+
+  // Solana
+  assert.match(generated.wallets.solana.address, /^[1-9A-HJ-NP-Za-km-z]{32,44}$/);
+  assert.ok(generated.wallets.solana.privateKey.length >= 32);
+
+  // Robinhood / EVM
+  assert.match(generated.wallets.robinhood.address, /^0x[0-9a-fA-F]{40}$/);
+  assert.match(generated.wallets.robinhood.privateKey, /^0x[0-9a-fA-F]{64}$/);
+
+  // Stacks
+  assert.match(generated.wallets.stacks.address, /^(SP|SM)/);
+  assert.match(generated.wallets.stacks.privateKey, /^[0-9a-fA-F]{64}$/);
+
+  // Deterministic re-derivation from seed
+  const derivedAgain = deriveUniversalWallet(generated.mnemonic);
+  assert.equal(derivedAgain.wallets.solana.address, generated.wallets.solana.address);
+  assert.equal(derivedAgain.wallets.robinhood.address, generated.wallets.robinhood.address);
+  assert.equal(derivedAgain.wallets.stacks.address, generated.wallets.stacks.address);
+
+  // deriveWallet accepts 12-word mnemonic directly
+  const evmFromMnemonic = deriveWallet("robinhood", generated.mnemonic);
+  assert.equal(evmFromMnemonic.address, generated.wallets.robinhood.address);
+  const solFromMnemonic = deriveWallet("solana", generated.mnemonic);
+  assert.equal(solFromMnemonic.address, generated.wallets.solana.address);
+});
+
+test("chooseTradeUsd respects trade range tiers and available wallet balance", () => {
+  // Test $5-$20 range
+  const tierSmall = chooseTradeUsd(100, 0, "5-20");
+  assert.equal(tierSmall.ok, true);
+  if (tierSmall.ok) {
+    assert.equal(tierSmall.clip.usd, 5);
+    assert.equal(tierSmall.clip.targetUsd, 5);
+    assert.equal(tierSmall.clip.capped, false);
+  }
+
+  // Test $21-$50 range
+  const tierMid = chooseTradeUsd(100, 0, "21-50");
+  assert.equal(tierMid.ok, true);
+  if (tierMid.ok) {
+    assert.equal(tierMid.clip.usd, 22);
+    assert.equal(tierMid.clip.targetUsd, 22);
+    assert.equal(tierMid.clip.capped, false);
+  }
+
+  // Test $51-$100 range
+  const tierHigh = chooseTradeUsd(100, 0, "51-100");
+  assert.equal(tierHigh.ok, true);
+  if (tierHigh.ok) {
+    assert.equal(tierHigh.clip.usd, 55);
+    assert.equal(tierHigh.clip.targetUsd, 55);
+    assert.equal(tierHigh.clip.capped, false);
+  }
+
+  // Respects available balance when bag is smaller than target
+  const limitedBalance = chooseTradeUsd(15, 0, "21-50");
+  assert.equal(limitedBalance.ok, true);
+  if (limitedBalance.ok) {
+    // Target was 22, but balance is 15 -> caps to usable bag (~14.93)
+    assert.ok(limitedBalance.clip.usd < 15);
+    assert.ok(limitedBalance.clip.usd >= 14);
+    assert.equal(limitedBalance.clip.capped, true);
+  }
+
+  // Reject when balance is under $1
+  const dust = chooseTradeUsd(0.5, 0, "5-20");
+  assert.equal(dust.ok, false);
 });
