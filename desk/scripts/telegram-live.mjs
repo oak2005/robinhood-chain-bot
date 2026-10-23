@@ -133,105 +133,147 @@ function generateMemo() {
 }
 
 let pool;
+let poolConnecting = null;
+let lastDbErrTime = 0;
+
 async function db() {
-  if (!process.env.DATABASE_URL) return null;
-  if (!pool) {
-    pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 4 });
-    await pool.query(`create table if not exists tg_wallets (
-      user_id text not null,
-      chain text not null,
-      address text not null,
-      wrapped text not null,
-      primary key (user_id, chain)
-    )`);
-    await pool.query(`create table if not exists tg_tokens (
-      id text primary key,
-      user_id text not null,
-      chain text not null,
-      token text not null,
-      symbol text not null default ''
-    )`);
-    await pool.query(`create table if not exists member_access (
-      user_id text primary key,
-      memo text not null unique,
-      paid_until timestamptz,
-      last_tx text not null default ''
-    )`);
-    await pool.query(`create table if not exists used_payments (
-      tx_hash text primary key,
-      user_id text not null,
-      pay_chain text not null,
-      asset text not null,
-      amount text not null
-    )`);
-    await pool.query(`create table if not exists member_settings (
-      user_id text primary key,
-      paused boolean not null default false,
-      interval text not null default '30m',
-      trade_range text not null default '5-20',
-      cycle_index int not null default 0,
-      next_recheck_ms bigint not null default 0,
-      last_trade_ms bigint not null default 0,
-      last_trade_text text not null default ''
-    )`);
-    await pool.query(`alter table member_settings add column if not exists trade_range text not null default '5-20'`);
-    await pool.query(`create table if not exists payment_disputes (
-      id text primary key,
-      user_id text not null,
-      tx_hash text not null,
-      chain text not null,
-      user_note text not null default '',
-      status text not null default 'pending',
-      admin_note text not null default '',
-      created_at timestamptz not null default now(),
-      resolved_at timestamptz
-    )`);
-  }
-  return pool;
+  const url = (process.env.DATABASE_URL ?? "").trim();
+  if (!url) return null;
+  if (pool) return pool;
+  if (poolConnecting) return poolConnecting;
+
+  poolConnecting = (async () => {
+    try {
+      const p = new pg.Pool({
+        connectionString: url,
+        max: 4,
+        connectionTimeoutMillis: 5000,
+        ssl: url.includes("localhost") || url.includes("127.0.0.1") ? false : { rejectUnauthorized: false },
+      });
+      await p.query("select 1");
+      await p.query(`create table if not exists tg_wallets (
+        user_id text not null,
+        chain text not null,
+        address text not null,
+        wrapped text not null,
+        primary key (user_id, chain)
+      )`);
+      await p.query(`create table if not exists tg_tokens (
+        id text primary key,
+        user_id text not null,
+        chain text not null,
+        token text not null,
+        symbol text not null default ''
+      )`);
+      await p.query(`create table if not exists member_access (
+        user_id text primary key,
+        memo text not null unique,
+        paid_until timestamptz,
+        last_tx text not null default ''
+      )`);
+      await p.query(`create table if not exists used_payments (
+        tx_hash text primary key,
+        user_id text not null,
+        pay_chain text not null,
+        asset text not null,
+        amount text not null
+      )`);
+      await p.query(`create table if not exists member_settings (
+        user_id text primary key,
+        paused boolean not null default false,
+        interval text not null default '30m',
+        trade_range text not null default '5-20',
+        cycle_index int not null default 0,
+        next_recheck_ms bigint not null default 0,
+        last_trade_ms bigint not null default 0,
+        last_trade_text text not null default ''
+      )`);
+      await p.query(`alter table member_settings add column if not exists trade_range text not null default '5-20'`);
+      await p.query(`create table if not exists payment_disputes (
+        id text primary key,
+        user_id text not null,
+        tx_hash text not null,
+        chain text not null,
+        user_note text not null default '',
+        status text not null default 'pending',
+        admin_note text not null default '',
+        created_at timestamptz not null default now(),
+        resolved_at timestamptz
+      )`);
+      pool = p;
+      return pool;
+    } catch (err) {
+      const now = Date.now();
+      if (now - lastDbErrTime > 30000) {
+        console.error("[db] Database initialization failed:", err?.message || err);
+        lastDbErrTime = now;
+      }
+      return null;
+    } finally {
+      poolConnecting = null;
+    }
+  })();
+
+  return poolConnecting;
 }
 
 async function getOrCreateMemberAccess(userId) {
-  const database = await db();
-  if (!database) return null;
-  const res = await database.query("select memo, paid_until::text as paid_until from member_access where user_id = $1", [userId]);
-  if (res.rows.length > 0) return res.rows[0];
-  const memo = generateMemo();
   try {
-    await database.query("insert into member_access (user_id, memo) values ($1, $2)", [userId, memo]);
-    return { memo, paid_until: null };
-  } catch {
-    const retry = await database.query("select memo, paid_until::text as paid_until from member_access where user_id = $1", [userId]);
-    return retry.rows[0] ?? null;
+    const database = await db();
+    if (!database) return null;
+    const res = await database.query("select memo, paid_until::text as paid_until from member_access where user_id = $1", [userId]);
+    if (res.rows.length > 0) return res.rows[0];
+    const memo = generateMemo();
+    try {
+      await database.query("insert into member_access (user_id, memo) values ($1, $2)", [userId, memo]);
+      return { memo, paid_until: null };
+    } catch {
+      const retry = await database.query("select memo, paid_until::text as paid_until from member_access where user_id = $1", [userId]);
+      return retry.rows[0] ?? null;
+    }
+  } catch (err) {
+    console.error("[getOrCreateMemberAccess] db error:", err?.message || err);
+    return null;
   }
 }
 
 async function getMemberSettings(userId) {
-  const database = await db();
-  if (!database) return { paused: false, interval: "30m", trade_range: "5-20", cycle_index: 0, next_recheck_ms: 0, last_trade_text: "" };
-  const res = await database.query("select * from member_settings where user_id = $1", [userId]);
-  if (res.rows.length > 0) return { trade_range: "5-20", ...res.rows[0] };
-  await database.query("insert into member_settings (user_id) values ($1) on conflict do nothing", [userId]);
-  return { paused: false, interval: "30m", trade_range: "5-20", cycle_index: 0, next_recheck_ms: 0, last_trade_text: "" };
+  const fallback = { paused: false, interval: "30m", trade_range: "5-20", cycle_index: 0, next_recheck_ms: 0, last_trade_text: "" };
+  try {
+    const database = await db();
+    if (!database) return fallback;
+    const res = await database.query("select * from member_settings where user_id = $1", [userId]);
+    if (res.rows.length > 0) return { trade_range: "5-20", ...res.rows[0] };
+    await database.query("insert into member_settings (user_id) values ($1) on conflict do nothing", [userId]);
+    return fallback;
+  } catch (err) {
+    console.error("[getMemberSettings] db error:", err?.message || err);
+    return fallback;
+  }
 }
 
 async function updateMemberSettings(userId, patch) {
-  const database = await db();
-  if (!database) return;
-  const current = await getMemberSettings(userId);
-  const next = { ...current, ...patch };
-  await database.query(
-    `insert into member_settings (user_id, paused, interval, trade_range, cycle_index, next_recheck_ms, last_trade_ms, last_trade_text)
-     values ($1, $2, $3, $4, $5, $6, $7, $8)
-     on conflict (user_id) do update set
-       paused = excluded.paused,
-       interval = excluded.interval,
-       trade_range = excluded.trade_range,
-       cycle_index = excluded.cycle_index,
-       next_recheck_ms = excluded.next_recheck_ms,
-       last_trade_ms = excluded.last_trade_ms,
-       last_trade_text = excluded.last_trade_text`,
-    [userId, next.paused, next.interval, next.trade_range || "5-20", next.cycle_index, next.next_recheck_ms, next.last_trade_ms, next.last_trade_text],
-  );
+  try {
+    const database = await db();
+    if (!database) return;
+    const current = await getMemberSettings(userId);
+    const next = { ...current, ...patch };
+    await database.query(
+      `insert into member_settings (user_id, paused, interval, trade_range, cycle_index, next_recheck_ms, last_trade_ms, last_trade_text)
+       values ($1, $2, $3, $4, $5, $6, $7, $8)
+       on conflict (user_id) do update set
+         paused = excluded.paused,
+         interval = excluded.interval,
+         trade_range = excluded.trade_range,
+         cycle_index = excluded.cycle_index,
+         next_recheck_ms = excluded.next_recheck_ms,
+         last_trade_ms = excluded.last_trade_ms,
+         last_trade_text = excluded.last_trade_text`,
+      [userId, next.paused, next.interval, next.trade_range || "5-20", next.cycle_index, next.next_recheck_ms, next.last_trade_ms, next.last_trade_text],
+    );
+  } catch (err) {
+    console.error("[updateMemberSettings] db error:", err?.message || err);
+  }
 }
 
 async function payInfoText(userId) {
@@ -585,8 +627,67 @@ async function savedLines(userId) {
 }
 
 async function balanceReply(userId) {
+  const isOwner = admin && userId === admin;
   const database = await db();
-  if (!database) return { text: "No database is connected yet." };
+
+  // Admin fallback: read directly from the public state file when no DB is configured
+  if (!database && isOwner) {
+    const lines = ["💰 *Owner NASTY Balance*", ""];
+    try {
+      const response = await fetch(`${STATE_URL}?t=${Date.now()}`, { signal: AbortSignal.timeout(8000) });
+      if (response.ok) {
+        const state = await response.json();
+        const gate = readGate();
+        const mins = Math.max(0, Math.ceil(((state.nextRecheck ?? 0) - Date.now()) / 60000));
+        const when = mins <= 0 ? "Next swap is due." : `Next swap in about ${mins} min.`;
+        lines.push(`🟢 Status: ${gate.paused ? "⏸️ Paused" : "Running on its own"}`);
+        lines.push(when);
+        if (state.token) {
+          lines.push(`Token: ${state.token.symbol} (${state.token.address})`);
+        }
+        lines.push("");
+        // Live chain preview
+        if (state.token) {
+          try {
+            const preview = await previewChain({
+              address: NASTY_WALLET,
+              token: state.token.address,
+              symbol: state.token.symbol ?? "NASTY",
+              decimals: state.token.decimals ?? 18,
+              pool: state.pool ?? null,
+            });
+            if (preview?.text) lines.push(preview.text);
+          } catch {}
+        }
+        if (state.lastPreview && !lines.some((l) => l.includes("Balance"))) {
+          lines.push(state.lastPreview);
+        }
+      } else {
+        lines.push("Could not read public state. GitHub may be rate-limiting.");
+      }
+    } catch (err) {
+      lines.push(`State fetch failed: ${err instanceof Error ? err.message : "Network error"}`);
+    }
+    lines.push("");
+    lines.push("ℹ️ Member database (DATABASE_URL) is not connected — member data unavailable.");
+    return {
+      text: lines.join("\n"),
+      reply_markup: { inline_keyboard: [[{ text: "🔄 Refresh", callback_data: "action:balance" }]] },
+    };
+  }
+
+  if (!database) {
+    return {
+      text: [
+        "💰 *Wallet & Token Balances*",
+        "",
+        "⚠️ No database is connected yet.",
+        "The Railway service needs a valid DATABASE_URL variable.",
+        "Once set, your wallet balances will appear here.",
+      ].join("\n"),
+    };
+  }
+
   const access = await getOrCreateMemberAccess(userId);
   const settings = await getMemberSettings(userId);
   const isPaid = access?.paid_until && new Date(access.paid_until).getTime() > Date.now();
@@ -662,10 +763,83 @@ async function balanceReply(userId) {
 }
 
 async function configReply(userId, isAdmin) {
-  const database = await db();
-  if (!database) return { text: "No database is connected yet." };
-  const settings = await getMemberSettings(userId);
   const gate = readGate();
+  const database = await db();
+
+  // Admin fallback: read from gate + public state file when no DB is configured
+  if (!database && isAdmin) {
+    const isPaused = gate.paused === true;
+    const currentInterval = gate.interval || "30m";
+    const currentRange = gate.trade_range || "5-20";
+    const rangeLabel = TRADE_RANGE_LABELS[currentRange] || currentRange;
+    let when = "Fetching swap clock...";
+    let lastPreview = "";
+    try {
+      const response = await fetch(`${STATE_URL}?t=${Date.now()}`, { signal: AbortSignal.timeout(8000) });
+      if (response.ok) {
+        const state = await response.json();
+        const mins = Math.max(0, Math.ceil(((state.nextRecheck ?? 0) - Date.now()) / 60000));
+        when = isPaused ? "Trading is paused." : mins <= 0 ? "Next swap is due." : `Next swap in about ${mins} min.`;
+        lastPreview = state.lastPreview || "";
+      }
+    } catch {}
+
+    const lines = [
+      "⚙️ *Inactivity Trade Configuration*",
+      "",
+      `• Bot Status: ${isPaused ? "⏸️ Paused (No new swaps)" : "🟢 Active (Running on its own)"}`,
+      `• Quiet Interval: *${currentInterval}* between cycles`,
+      `• Trade Scope: *${rangeLabel}* per swap clip`,
+      `• Swap Clock: ${when}`,
+    ];
+    if (lastPreview) {
+      lines.push("");
+      lines.push(lastPreview);
+    }
+    lines.push("");
+    lines.push("ℹ️ Member database (DATABASE_URL) not connected — member data unavailable.");
+    lines.push("Tap below to adjust interval, trade scope, or pause/resume:");
+
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: currentInterval === "10m" ? "✅ 10m" : "10m", callback_data: "interval:10m" },
+          { text: currentInterval === "20m" ? "✅ 20m" : "20m", callback_data: "interval:20m" },
+          { text: currentInterval === "30m" ? "✅ 30m" : "30m", callback_data: "interval:30m" },
+          { text: currentInterval === "1h" ? "✅ 1h" : "1h", callback_data: "interval:1h" },
+        ],
+        [
+          { text: currentRange === "5-20" ? "✅ $5–$20" : "$5–$20", callback_data: "range:5-20" },
+          { text: currentRange === "21-50" ? "✅ $21–$50" : "$21–$50", callback_data: "range:21-50" },
+        ],
+        [
+          { text: currentRange === "51-100" ? "✅ $51–$100" : "$51–$100", callback_data: "range:51-100" },
+          { text: currentRange === "100+" ? "✅ $100+" : "$100+", callback_data: "range:100+" },
+        ],
+        [
+          isPaused
+            ? { text: "▶️ Resume Trading", callback_data: "action:resume" }
+            : { text: "⏸️ Pause Trading", callback_data: "action:pause" },
+          { text: "🔄 Refresh Config", callback_data: "action:config" },
+        ],
+      ],
+    };
+    return { text: lines.join("\n"), reply_markup: keyboard };
+  }
+
+  if (!database) {
+    return {
+      text: [
+        "⚙️ *Trade Configuration*",
+        "",
+        "⚠️ No database is connected yet.",
+        "The Railway service needs a valid DATABASE_URL variable.",
+        "Once set, your configuration will appear here.",
+      ].join("\n"),
+    };
+  }
+
+  const settings = await getMemberSettings(userId);
 
   const isPaused = isAdmin ? gate.paused === true : settings.paused === true;
   const currentInterval = isAdmin ? (gate.interval || "30m") : (settings.interval || "30m");
@@ -676,7 +850,7 @@ async function configReply(userId, isAdmin) {
   const mins = Math.max(0, Math.ceil(((Number(settings.next_recheck_ms) || 0) - Date.now()) / 60000));
   const when = isPaused ? "Trading is paused." : mins <= 0 ? "Next swap is due." : `Next swap in about ${mins} min.`;
 
-  const currentRange = settings.trade_range || "5-20";
+  const currentRange = isAdmin ? (gate.trade_range || settings.trade_range || "5-20") : (settings.trade_range || "5-20");
   const rangeLabel = TRADE_RANGE_LABELS[currentRange] || currentRange;
 
   const lines = [
@@ -736,21 +910,42 @@ async function configReply(userId, isAdmin) {
 }
 
 async function tokenReply(userId) {
-  const database = await db();
-  if (!database) return { text: "No database is connected yet." };
+  const isAdmin = admin && userId === admin;
+  let activeTokenHeader = "";
 
-  const tokens = await database.query("select id, chain, token, symbol from tg_tokens where user_id = $1 order by chain", [userId]);
+  if (isAdmin) {
+    try {
+      const response = await fetch(`${STATE_URL}?t=${Date.now()}`, { signal: AbortSignal.timeout(5000) });
+      if (response.ok) {
+        const state = await response.json();
+        if (state.token) {
+          activeTokenHeader = `🪙 *Admin Active Token:* ${state.token.symbol || "NASTY"}\nContract: \`${state.token.address}\`\n\n`;
+        }
+      }
+    } catch {}
+  }
+
+  let tokens = { rows: [] };
+  try {
+    const database = await db();
+    if (database) {
+      tokens = await database.query("select id, chain, token, symbol from tg_tokens where user_id = $1 order by chain", [userId]);
+    }
+  } catch (err) {
+    console.error("[tokenReply] db error:", err?.message || err);
+  }
 
   if (!tokens.rows.length) {
     return {
       text: [
+        activeTokenHeader,
         "🪙 *Token Management*",
         "",
-        "No tokens are currently saved for this account.",
+        "No additional tokens are currently saved for this account.",
         "You can add up to 3 tokens to trade on Solana, Stacks, or Robinhood.",
         "",
         "Tap Add token below to add a coin address:",
-      ].join("\n"),
+      ].filter(Boolean).join("\n"),
       reply_markup: {
         inline_keyboard: [
           [{ text: "➕ Add Token", callback_data: "action:addtoken" }],
@@ -985,8 +1180,9 @@ function helpText() {
 
 async function intervalReply(userId, isAdmin, arg) {
   const currentSettings = await getMemberSettings(userId);
-  const currentInterval = isAdmin ? (readGate().interval || "30m") : (currentSettings.interval || "30m");
-  const currentRange = currentSettings.trade_range || "5-20";
+  const gate = readGate();
+  const currentInterval = isAdmin ? (gate.interval || "30m") : (currentSettings.interval || "30m");
+  const currentRange = isAdmin ? (gate.trade_range || currentSettings.trade_range || "5-20") : (currentSettings.trade_range || "5-20");
 
   if (!arg) {
     const keyboard = {
@@ -1024,6 +1220,9 @@ async function intervalReply(userId, isAdmin, arg) {
 
   const rangeVal = arg.startsWith("range:") ? arg.replace("range:", "") : arg;
   if (TRADE_RANGES.includes(rangeVal)) {
+    if (isAdmin) {
+      writeGate({ trade_range: rangeVal });
+    }
     await updateMemberSettings(userId, { trade_range: rangeVal });
     return intervalReply(userId, isAdmin, null);
   }
@@ -1789,7 +1988,11 @@ while (true) {
           }
         } catch (error) {
           const reason = error instanceof Error ? error.message : "Button action failed.";
-          await send(chatId, reason.slice(0, 300));
+          if (reason.includes("password authentication failed") || reason.includes("ECONNREFUSED") || reason.includes("ETIMEDOUT")) {
+            await send(chatId, "⚠️ Database service connection error. Please verify the DATABASE_URL credentials in Railway.");
+          } else {
+            await send(chatId, reason.slice(0, 300));
+          }
         }
         continue;
       }
@@ -1903,7 +2106,11 @@ while (true) {
         await send(chatId, reply.text, reply.reply_markup);
       } catch (error) {
         const reason = error instanceof Error ? error.message : "That could not be saved.";
-        await send(chatId, reason.slice(0, 300));
+        if (reason.includes("password authentication failed") || reason.includes("ECONNREFUSED") || reason.includes("ETIMEDOUT")) {
+          await send(chatId, "⚠️ Database service connection error. Please verify the DATABASE_URL credentials in Railway.");
+        } else {
+          await send(chatId, reason.slice(0, 300));
+        }
       }
     }
   } catch {

@@ -334,4 +334,3 @@ try {
   /* keep the printed result */
 }
 process.stdout.write(`${text}\n`);
-
