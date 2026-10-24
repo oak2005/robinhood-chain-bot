@@ -12,6 +12,7 @@ import { previewSolana, runSolanaCycle } from "../src/lib/chain/solana-cycle.ts"
 import { previewStacks, runStacksCycle } from "../src/lib/chain/stacks-cycle.ts";
 import { checkTokenInactivity } from "../src/lib/chain/inactivity.ts";
 import { generateUniversalWallet } from "../src/lib/members/keys.ts";
+import { LightweightDb } from "../src/lib/db/lightweight-db.ts";
 
 process.on("unhandledRejection", (err) => console.error("[telegram-live:unhandledRejection]", err));
 process.on("uncaughtException", (err) => console.error("[telegram-live:uncaughtException]", err));
@@ -189,7 +190,7 @@ function generateMemo() {
 
 let pool;
 let poolConnecting = null;
-let pgliteInstance = null;
+let lightweightDbInstance = null;
 let lastDbErrTime = 0;
 let dbBackendName = "";
 
@@ -247,19 +248,18 @@ async function initDbTables(client) {
   )`);
 }
 
-async function getPgliteFallback() {
-  if (pgliteInstance) return pgliteInstance;
+async function getLightweightFallback() {
+  if (lightweightDbInstance) return lightweightDbInstance;
   try {
-    const { PGlite } = await import("@electric-sql/pglite");
-    const instance = new PGlite();
-    await instance.waitReady;
+    const storePath = process.env.DATA_DIR ? `${process.env.DATA_DIR}/bot-store.json` : "./data/bot-store.json";
+    const instance = new LightweightDb(storePath);
     await initDbTables(instance);
-    pgliteInstance = instance;
-    dbBackendName = "In-Memory PGLite";
-    console.log(`[db] ${dbBackendName} initialized successfully.`);
-    return pgliteInstance;
+    lightweightDbInstance = instance;
+    dbBackendName = "Lightweight Store";
+    console.log(`[db] Lightweight JSON Store initialized successfully at ${storePath}.`);
+    return lightweightDbInstance;
   } catch (err) {
-    console.warn("[db] In-Memory PGLite initialization notice:", err?.message || err);
+    console.warn("[db] Lightweight Store initialization notice:", err?.message || err);
     return null;
   }
 }
@@ -300,8 +300,8 @@ async function db() {
     }
   }
 
-  // Resilient fallback: always returns a functional database instance
-  return await getPgliteFallback();
+  // Resilient fallback: zero-memory, persistent, immune to WASM OOM crashes
+  return await getLightweightFallback();
 }
 
 async function getOrCreateMemberAccess(userId) {
