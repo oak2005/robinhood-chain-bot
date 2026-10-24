@@ -10,7 +10,7 @@ import { clearRecovery, previewChain, runChainCycle } from "../src/lib/chain/cyc
 import { readUnifiedWalletBalances } from "../src/lib/chain/balance-reader.ts";
 import { previewSolana, runSolanaCycle } from "../src/lib/chain/solana-cycle.ts";
 import { previewStacks, runStacksCycle } from "../src/lib/chain/stacks-cycle.ts";
-import { checkTokenInactivity } from "../src/lib/chain/inactivity.ts";
+import { checkTokenInactivity, checkRobinhoodInactivity } from "../src/lib/chain/inactivity.ts";
 import { generateUniversalWallet, deriveUniversalWallet } from "../src/lib/members/keys.ts";
 import { LightweightDb } from "../src/lib/db/lightweight-db.ts";
 
@@ -1613,6 +1613,24 @@ async function beginKey(chatId) {
       "• *Add Wallet Phrase Back*: Restore an existing 12-word seed phrase. Re-connects all 3 chain addresses at once!",
       "• *Import Single Private Key*: Manually paste an individual private key for a single chain.",
     ].join("\n"),
+    reply_markup: keyboard,
+  };
+}
+
+async function beginToken(chatId) {
+  pending.set(chatId, { step: "chain-token" });
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "Solana", callback_data: "chain:solana" },
+        { text: "Stacks", callback_data: "chain:stacks" },
+        { text: "Robinhood", callback_data: "chain:robinhood" },
+      ],
+      [{ text: "Cancel", callback_data: "action:cancel" }],
+    ],
+  };
+  return {
+    text: "Which chain is the token on? Tap a button or reply Solana, Stacks, or Robinhood.",
     reply_markup: keyboard,
   };
 }
