@@ -97,7 +97,10 @@ function startBotPoller() {
 
   botChild.on("exit", (code, signal) => {
     botRestarts++;
-    console.warn(`[supervisor] ⚠️ Telegram bot exited with code ${code}, signal ${signal}`);
+    const msg = `[supervisor] ⚠️ Telegram bot exited with code ${code}, signal ${signal}`;
+    console.warn(msg);
+    logBuffer.push(`[${new Date().toISOString()}] ${msg}`);
+    try { fs.writeFileSync(LOG_FILE, logBuffer.join("\n")); } catch {}
     if (!shuttingDown) {
       const delay = Math.min(3000 * Math.min(botRestarts, 5), 15000);
       console.log(`[supervisor] Auto-restarting Telegram bot in ${delay / 1000}s...`);

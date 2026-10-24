@@ -251,27 +251,16 @@ async function getPgliteFallback() {
   if (pgliteInstance) return pgliteInstance;
   try {
     const { PGlite } = await import("@electric-sql/pglite");
-    const dataDir = process.env.RAILWAY_VOLUME_MOUNT_PATH
-      ? `${process.env.RAILWAY_VOLUME_MOUNT_PATH}/pglite-data`
-      : "./data/pglite-data";
-    try { fs.mkdirSync(dataDir, { recursive: true }); } catch {}
-    const instance = new PGlite(dataDir);
-    await instance.waitReady;
-    await initDbTables(instance);
-    pgliteInstance = instance;
-    dbBackendName = `Embedded PGLite (${dataDir})`;
-    console.log(`[db] ${dbBackendName} initialized successfully.`);
-    return pgliteInstance;
-  } catch (err) {
-    console.warn("[db] Disk PGLite initialization failed, falling back to in-memory PGLite:", err?.message || err);
-    const { PGlite } = await import("@electric-sql/pglite");
     const instance = new PGlite();
     await instance.waitReady;
     await initDbTables(instance);
     pgliteInstance = instance;
     dbBackendName = "In-Memory PGLite";
-    console.log(`[db] ${dbBackendName} ready.`);
+    console.log(`[db] ${dbBackendName} initialized successfully.`);
     return pgliteInstance;
+  } catch (err) {
+    console.warn("[db] In-Memory PGLite initialization notice:", err?.message || err);
+    return null;
   }
 }
 
@@ -284,11 +273,12 @@ async function db() {
     if (poolConnecting) return await poolConnecting;
     try {
       poolConnecting = (async () => {
+        const isInternalRailway = url.includes("railway.internal") || url.includes("localhost") || url.includes("127.0.0.1");
         const p = new pg.Pool({
           connectionString: url,
           max: 4,
           connectionTimeoutMillis: 5000,
-          ssl: url.includes("localhost") || url.includes("127.0.0.1") ? false : { rejectUnauthorized: false },
+          ssl: isInternalRailway ? false : (url.includes("sslmode=require") || url.includes("neon.tech") ? { rejectUnauthorized: false } : false),
         });
         await p.query("select 1");
         await initDbTables(p);
@@ -1342,6 +1332,11 @@ async function setupBotMenu() {
       const btnData = await btnRes.json().catch(() => ({}));
       console.log(`[setupBotMenu] setChatMenuButton attempt ${attempt}: status ${btnRes.status}`, btnData);
 
+      if (cmdRes.status === 429 || btnRes.status === 429) {
+        console.warn("[setupBotMenu] Telegram menu rate-limited (429). Skipping menu update.");
+        break;
+      }
+
       if (cmdData?.ok && btnData?.ok) {
         writeGate({ menuReady: true });
         break;
@@ -2121,7 +2116,9 @@ async function checkMemberSwaps() {
 setInterval(checkMemberSwaps, 30_000);
 
 // Initialize database eagerly on startup
+console.log("[startup] Initializing database...");
 await db().catch((err) => console.error("[startup] Database init error:", err));
+console.log(`[startup] Database initialized (backend: ${dbBackendName || "None"}).`);
 
 // Clear any webhook so getUpdates polling works cleanly
 await fetch(`https://api.telegram.org/bot${token}/deleteWebhook?drop_pending_updates=false`, { signal: AbortSignal.timeout(10000) })
