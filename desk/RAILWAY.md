@@ -19,13 +19,31 @@ This service runs the **Inactivity Trade Live Telegram Bot (24/7)** and the **We
 | `TELEGRAM_ADMIN_ID` | Your numeric Telegram user ID (from [@userinfobot](https://t.me/userinfobot)) | `123456789` |
 | `VAULT_KEY` | Secret key (min 16 chars) used to seal member private keys via AES-256-GCM | `super-secret-vault-key-32-chars-long` |
 
-### 🟢 Optional Variables:
-| Variable | Description | Default |
+### 💾 Data Persistence (CRITICAL to prevent data wipe on updates):
+By default, Docker containers in Railway have **ephemeral filesystems** — meaning every git push/redeploy starts a clean container.
+To keep your users' payments, wallets, and settings permanently saved across updates, use either:
+
+1. **Option A (Recommended - Railway PostgreSQL Database)**:
+   - In your Railway project, click **+ New** -> **Database** -> **Add PostgreSQL**.
+   - In your `robinhood-chain-bot` service -> **Variables** tab -> click **+ New Variable**:
+     - Variable Name: `DATABASE_URL`
+     - Value: `${{Postgres.DATABASE_URL}}` (or paste your PostgreSQL connection URL).
+   - *Result:* All member access, payments, wallets, and tokens are saved in PostgreSQL and will **NEVER be cleared** when you deploy updates!
+
+2. **Option B (Railway Persistent Volume)**:
+   - In your Railway project, click your service -> **Settings** tab -> scroll down to **Volumes**.
+   - Click **+ Add Volume** -> Set Mount Path to `/data`.
+   - *Result:* The bot will automatically detect the volume and persist all data to `/data/bot-store.json` across all deploys!
+
+---
+
+### 🟢 Service Variables:
+| Variable | Description | Example |
 | :--- | :--- | :--- |
-| `DATABASE_URL` | **Leave EMPTY for internal database!** When empty, the bot automatically uses embedded local **PGlite** (`./data/pglite-data`). No Neon, Supabase, or external PostgreSQL needed. | Embedded PGlite |
+| `DATABASE_URL` | PostgreSQL connection string for permanent multi-deploy persistence | `${{Postgres.DATABASE_URL}}` |
 | `PORT` | Web port automatically supplied by Railway | `8080` |
 | `BETTER_AUTH_SECRET` | Secret for web desk authentication | auto-generated |
-| `BETTER_AUTH_URL` | Web desk public URL (e.g. `https://robinhood-chain-bot-production.up.railway.app`) | Railway URL |
+| `BETTER_AUTH_URL` | Web desk public URL | Railway URL |
 
 ---
 

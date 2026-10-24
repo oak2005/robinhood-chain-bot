@@ -281,16 +281,80 @@ async function initDbTables(client) {
 async function getLightweightFallback() {
   if (lightweightDbInstance) return lightweightDbInstance;
   try {
-    const storePath = process.env.DATA_DIR ? `${process.env.DATA_DIR}/bot-store.json` : "./data/bot-store.json";
+    const persistentDir = process.env.RAILWAY_VOLUME_MOUNT_PATH
+      || process.env.DATA_DIR
+      || (fs.existsSync("/data") ? "/data" : "./data");
+    const storePath = `${persistentDir}/bot-store.json`;
+    const isPersistent = Boolean(process.env.RAILWAY_VOLUME_MOUNT_PATH || (fs.existsSync("/data") && persistentDir === "/data"));
     const instance = new LightweightDb(storePath);
     await initDbTables(instance);
     lightweightDbInstance = instance;
-    dbBackendName = "Lightweight Store";
-    console.log(`[db] Lightweight JSON Store initialized successfully at ${storePath}.`);
+    dbBackendName = isPersistent ? "Persistent Volume Store" : "Lightweight Ephemeral Store";
+    console.log(`[db] Lightweight JSON Store initialized successfully at ${storePath} (persistent: ${isPersistent}).`);
     return lightweightDbInstance;
   } catch (err) {
     console.warn("[db] Lightweight Store initialization notice:", err?.message || err);
     return null;
+  }
+}
+
+async function syncJsonStoreToPostgres(pgPool) {
+  const possiblePaths = [
+    process.env.RAILWAY_VOLUME_MOUNT_PATH ? `${process.env.RAILWAY_VOLUME_MOUNT_PATH}/bot-store.json` : null,
+    process.env.DATA_DIR ? `${process.env.DATA_DIR}/bot-store.json` : null,
+    "./data/bot-store.json",
+    "../data/bot-store.json",
+  ].filter(Boolean);
+
+  let targetPath = null;
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) {
+      targetPath = p;
+      break;
+    }
+  }
+
+  if (!targetPath) return;
+
+  try {
+    const raw = JSON.parse(fs.readFileSync(targetPath, "utf8"));
+    if (Array.isArray(raw.member_access) && raw.member_access.length > 0) {
+      for (const m of raw.member_access) {
+        await pgPool.query(
+          "insert into member_access (user_id, memo, paid_until, last_tx) values ($1, $2, $3, $4) on conflict (user_id) do update set paid_until = coalesce(excluded.paid_until, member_access.paid_until)",
+          [m.user_id, m.memo, m.paid_until, m.last_tx || ""],
+        );
+      }
+    }
+    if (Array.isArray(raw.tg_wallets) && raw.tg_wallets.length > 0) {
+      for (const w of raw.tg_wallets) {
+        await pgPool.query(
+          "insert into tg_wallets (user_id, chain, address, wrapped) values ($1, $2, $3, $4) on conflict (user_id, chain) do nothing",
+          [w.user_id, w.chain, w.address, w.wrapped],
+        );
+      }
+    }
+    if (Array.isArray(raw.tg_tokens) && raw.tg_tokens.length > 0) {
+      for (const t of raw.tg_tokens) {
+        await pgPool.query(
+          "insert into tg_tokens (id, user_id, chain, token, symbol) values ($1, $2, $3, $4, $5) on conflict (id) do nothing",
+          [t.id || randomUUID(), t.user_id, t.chain, t.token, t.symbol || ""],
+        );
+      }
+    }
+    if (Array.isArray(raw.member_settings) && raw.member_settings.length > 0) {
+      for (const s of raw.member_settings) {
+        await pgPool.query(
+          `insert into member_settings (user_id, paused, interval, trade_range, cycle_index, next_recheck_ms, last_trade_ms, last_trade_text)
+           values ($1, $2, $3, $4, $5, $6, $7, $8)
+           on conflict (user_id) do nothing`,
+          [s.user_id, s.paused, s.interval, s.trade_range || "5-20", s.cycle_index || 0, s.next_recheck_ms || 0, s.last_trade_ms || 0, s.last_trade_text || ""],
+        );
+      }
+    }
+    console.log(`[db] Successfully synced existing data from ${targetPath} into PostgreSQL.`);
+  } catch (err) {
+    console.warn("[db] syncJsonStoreToPostgres notice:", err?.message || err);
   }
 }
 
@@ -304,17 +368,43 @@ async function db() {
     try {
       poolConnecting = (async () => {
         const isInternalRailway = url.includes("railway.internal") || url.includes("localhost") || url.includes("127.0.0.1");
-        const p = new pg.Pool({
-          connectionString: url,
-          max: 4,
-          connectionTimeoutMillis: 5000,
-          ssl: isInternalRailway ? false : (url.includes("sslmode=require") || url.includes("neon.tech") ? { rejectUnauthorized: false } : false),
-        });
-        await p.query("select 1");
+        
+        let p;
+        try {
+          p = new pg.Pool({
+            connectionString: url,
+            max: 4,
+            connectionTimeoutMillis: 10000,
+            ssl: isInternalRailway ? false : { rejectUnauthorized: false },
+          });
+          await p.query("select 1");
+        } catch (sslErr) {
+          if (!isInternalRailway) {
+            console.warn("[db] SSL connection failed, retrying without SSL:", sslErr?.message || sslErr);
+            p = new pg.Pool({
+              connectionString: url,
+              max: 4,
+              connectionTimeoutMillis: 10000,
+              ssl: false,
+            });
+            await p.query("select 1");
+          } else {
+            throw sslErr;
+          }
+        }
+
         await initDbTables(p);
         pool = p;
         dbBackendName = "Remote PostgreSQL";
-        console.log("[db] Remote PostgreSQL connected successfully.");
+        console.log("[db] Remote PostgreSQL connected successfully and verified tables.");
+
+        // Automatically sync any previous data from local bot-store.json into Postgres!
+        try {
+          await syncJsonStoreToPostgres(p);
+        } catch (syncErr) {
+          console.warn("[db] Notice syncing local store to Postgres:", syncErr?.message || syncErr);
+        }
+
         return pool;
       })();
       const res = await poolConnecting;
@@ -324,13 +414,14 @@ async function db() {
       poolConnecting = null;
       const now = Date.now();
       if (now - lastDbErrTime > 30000) {
-        console.warn("[db] Remote PostgreSQL failed (" + (err?.message || err) + "). Falling back to resilient embedded database.");
+        console.error("[db] ❌ Remote PostgreSQL connection failed:", err?.message || err);
+        console.warn("[db] Falling back to local store. WARNING: If running on Railway without a Volume, data in local store will reset on new deploys.");
         lastDbErrTime = now;
       }
     }
   }
 
-  // Resilient fallback: zero-memory, persistent, immune to WASM OOM crashes
+  // Resilient fallback: persistent if volume mounted, or container disk
   return await getLightweightFallback();
 }
 
@@ -2613,9 +2704,13 @@ await fetch(`https://api.telegram.org/bot${token}/deleteWebhook?drop_pending_upd
 if (admin) {
   const adminChatId = Number(admin);
   if (adminChatId) {
+    const isEphemeral = dbBackendName === "Lightweight Ephemeral Store";
+    const storageWarning = isEphemeral
+      ? "\n\n⚠️ *CRITICAL: Ephemeral Storage Active*\nMember payments & wallets will reset on git deploys. Add Railway PostgreSQL (`DATABASE_URL=${{Postgres.DATABASE_URL}}`) or a Volume mounted at `/data` to keep data permanent."
+      : "\n✅ *Permanent Storage Active* (data will survive all deploys).";
     await send(
       adminChatId,
-      `🟢 *Inactivity Trade Live Bot Online*\n\nDatabase: \`${dbBackendName || "Ready"}\`\nListening for commands and swap events.`,
+      `🟢 *Inactivity Trade Live Bot Online*\n\nDatabase: \`${dbBackendName || "Ready"}\`${storageWarning}\n\nListening for commands and swap events.`,
       MENU,
     ).catch((err) => console.error("[telegram-live] Failed to send admin startup message:", err));
   }
