@@ -126,7 +126,7 @@ function writeGate(patch) {
   try {
     fs.mkdirSync("/tmp", { recursive: true });
   } catch {}
-  const next = { ...readGate(), ...patch, telegram: true };
+  const next = { telegram: true, ...readGate(), ...patch };
   fs.writeFileSync(GATE, JSON.stringify(next));
 }
 
@@ -1225,21 +1225,52 @@ async function ensureToken() {
 
 await ensureToken();
 
+let botUsername = "";
+let botId = null;
+
 try {
   const meRes = await fetch(`https://api.telegram.org/bot${token}/getMe`, { signal: AbortSignal.timeout(10000) });
   const meData = await meRes.json();
   if (meData.ok) {
+    botUsername = meData.result.username || "";
+    botId = meData.result.id || null;
     console.log(`[telegram-live] ✅ Connected to Telegram bot: @${meData.result.username} (ID: ${meData.result.id}, Name: ${meData.result.first_name})`);
     updateHeartbeat({ botUsername: meData.result.username, botId: meData.result.id, status: "ready" });
+    writeGate({
+      telegram: true,
+      tokenValid: true,
+      botUsername: meData.result.username,
+      botId: meData.result.id,
+      paused: readGate().paused === true,
+      interval: readGate().interval || "",
+      error: null,
+    });
   } else {
-    console.warn("[telegram-live] ⚠️ getMe warning:", meData.description);
+    const errorDesc = meData.description || "Invalid Telegram Bot Token";
+    console.error("==================================================================================");
+    console.error(`❌ [telegram-live] TELEGRAM_BOT_TOKEN ERROR: ${errorDesc}`);
+    console.error("If you updated TELEGRAM_BOT_TOKEN in GitHub Secrets, remember you MUST also update");
+    console.error("it in Railway: Railway Dashboard -> Project -> Variables -> TELEGRAM_BOT_TOKEN!");
+    console.error("==================================================================================");
+    writeGate({
+      telegram: false,
+      tokenValid: false,
+      error: `Telegram getMe failed: ${errorDesc}`,
+      paused: readGate().paused === true,
+      interval: readGate().interval || "",
+    });
   }
 } catch (e) {
-  console.warn("[telegram-live] ⚠️ getMe notice:", e?.message || e);
+  const errorMsg = e?.message || String(e);
+  console.warn("[telegram-live] ⚠️ getMe notice:", errorMsg);
+  writeGate({
+    telegram: false,
+    tokenValid: false,
+    error: errorMsg,
+  });
 }
 
-console.log(`[telegram-live] Telegram token verified (admin: ${admin ? admin : "none"}).`);
-writeGate({ paused: readGate().paused === true, interval: readGate().interval || "" });
+console.log(`[telegram-live] Telegram token check complete (admin: ${admin ? admin : "none"}).`);
 
 function buildTradeInlineMarkup(text, tokenAddress, chain = "robinhood") {
   const sellMatch = (text || "").match(/Sell(?:\s*\n\s*|[\s:]+)([0-9a-zA-Z]{40,90})/i);
@@ -2127,13 +2158,36 @@ while (true) {
     if (!response.ok) {
       if (response.status === 409) {
         console.warn("[telegram-live] ⚠️ 409 Conflict: another instance is calling getUpdates. Backing off 10s...");
+        writeGate({ telegram: false, conflict: true, error: "409 Conflict" });
         await new Promise((resolve) => setTimeout(resolve, 10000 + Math.random() * 5000));
+        continue;
+      }
+      if (response.status === 401) {
+        console.error("==================================================================================");
+        console.error("❌ [telegram-live] 401 UNAUTHORIZED from Telegram API!");
+        console.error("The bot token configured in Railway is invalid or has been revoked.");
+        console.error("Please update TELEGRAM_BOT_TOKEN in Railway Dashboard -> Variables.");
+        console.error("==================================================================================");
+        writeGate({
+          telegram: false,
+          tokenValid: false,
+          error: "401 Unauthorized: TELEGRAM_BOT_TOKEN invalid in Railway Variables",
+        });
+        await new Promise((resolve) => setTimeout(resolve, 10000));
         continue;
       }
       console.error(`[telegram-live] getUpdates failed (${response.status}):`, payload?.description || JSON.stringify(payload));
       await new Promise((resolve) => setTimeout(resolve, 3000));
       continue;
     }
+    // Update gate on successful poll
+    writeGate({
+      telegram: true,
+      tokenValid: true,
+      botUsername,
+      lastPollSuccess: Date.now(),
+      error: null,
+    });
     for (const update of payload.result ?? []) {
       if (typeof update.update_id === "number") {
         offset = Math.max(offset, update.update_id + 1);

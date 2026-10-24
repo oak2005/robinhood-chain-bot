@@ -21,6 +21,45 @@ const BUTTONS: Record<string, string> = {
   Pay: "/pay",
 };
 
+const COMMAND_SYNONYMS: Record<string, string> = {
+  status: "/status",
+  balance: "/balance",
+  bal: "/balance",
+  config: "/config",
+  settings: "/config",
+  token: "/tokeninfo",
+  tokeninfo: "/tokeninfo",
+  help: "/help",
+  start: "/start",
+  resume: "/resume",
+  pause: "/pause",
+  stop: "/emergency_stop",
+  interval: "/interval",
+  "add token": "/addtoken",
+  addtoken: "/addtoken",
+  "add key": "/addkey",
+  addkey: "/addkey",
+  "remove key": "/removekey",
+  removekey: "/removekey",
+  "remove token": "/removetoken",
+  removetoken: "/removetoken",
+  pay: "/pay",
+};
+
+function normalizeCommand(raw: string): string {
+  const trimmed = raw.trim();
+  if (BUTTONS[trimmed]) return BUTTONS[trimmed];
+  const lower = trimmed.toLowerCase();
+  if (COMMAND_SYNONYMS[lower]) return COMMAND_SYNONYMS[lower];
+  if (trimmed.startsWith("/")) return trimmed;
+  const parts = trimmed.split(/\s+/);
+  const firstLower = parts[0]?.toLowerCase() ?? "";
+  if (COMMAND_SYNONYMS[firstLower]) {
+    return `${COMMAND_SYNONYMS[firstLower]} ${parts.slice(1).join(" ")}`.trim();
+  }
+  return trimmed;
+}
+
 const MENU = {
   keyboard: [
     [{ text: "Status" }, { text: "Balance" }, { text: "Config" }],
@@ -150,8 +189,19 @@ async function drainCommands() {
       const chat = message?.chat as Record<string, unknown> | undefined;
       const chatId = typeof chat?.id === "number" ? chat.id : 0;
       if (!raw || !chatId) continue;
-      const text = BUTTONS[raw] ?? raw;
-      if (!text.startsWith("/")) continue;
+      const text = normalizeCommand(raw);
+      if (!text.startsWith("/")) {
+        await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: "👋 Welcome to *Inactivity Trade Bot*.\n\nTap a button below or type `/status`, `/balance`, or `/help`.",
+            reply_markup: MENU,
+          }),
+        }).catch(() => {});
+        continue;
+      }
       const isAdmin = String(from?.id ?? "") === admin;
       const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as BotState;
       const cmd = text.split(/\s+/)[0]?.split("@")[0] ?? "";
@@ -298,9 +348,16 @@ try {
   if (secretToken) await setupBotMenu(secretToken);
 } catch {}
 
-// Live Telegram bot runs 24/7 on Railway via telegram-live.mjs.
-// getUpdates polling from GitHub Actions is skipped by default to avoid 409 Conflict.
-await (process.env.STILLMARK_ENABLE_GH_DRAIN === "1" ? drainCommands().catch(() => undefined) : Promise.resolve());
+// If Railway is actively running with a valid bot token, it sets telegram: true,
+// which sets STILLMARK_SKIP_DRAIN=1 in trade.yml. In that case we skip getUpdates to avoid 409 conflict.
+// If Railway is inactive, down, or has an invalid token (telegram: false), GitHub Actions acts as fallback drain.
+const skipDrain = process.env.STILLMARK_SKIP_DRAIN === "1";
+if (!skipDrain) {
+  console.log("[wake-once] Railway live bot is not verified/active. Polling commands via GitHub Actions...");
+  await drainCommands().catch((e) => console.error("[wake-once] drainCommands error:", e?.message || e));
+} else {
+  console.log("[wake-once] Railway live bot is active 24/7. Skipping GitHub Actions drain to avoid 409 Conflict.");
+}
 const line = await runDueTrade(true);
 try {
   const statePath = `${ROOT}/data/stillmark-bot.json`;
