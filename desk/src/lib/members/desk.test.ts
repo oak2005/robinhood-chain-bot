@@ -198,3 +198,17 @@ test("chooseTradeUsd respects trade range tiers and available wallet balance", (
   const dust = chooseTradeUsd(0.5, 0, "5-20");
   assert.equal(dust.ok, false);
 });
+
+test("universal wallet restore handles 12-word seed phrase accurately", () => {
+  const generated = generateUniversalWallet();
+  const restored = deriveUniversalWallet(generated.mnemonic.toUpperCase());
+  assert.equal(restored.wallets.solana.address, generated.wallets.solana.address);
+  assert.equal(restored.wallets.robinhood.address, generated.wallets.robinhood.address);
+  assert.equal(restored.wallets.stacks.address, generated.wallets.stacks.address);
+
+  // Private keys derived from restored phrase match
+  assert.equal(restored.wallets.solana.privateKey, generated.wallets.solana.privateKey);
+  assert.equal(restored.wallets.robinhood.privateKey, generated.wallets.robinhood.privateKey);
+  assert.equal(restored.wallets.stacks.privateKey, generated.wallets.stacks.privateKey);
+});
+

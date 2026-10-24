@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { getSql } from "@/lib/db";
-import { deriveWallet, normalToken, tokenLooksRight, type DeskChain } from "./keys";
+import { deriveUniversalWallet, deriveWallet, normalToken, tokenLooksRight, type DeskChain } from "./keys";
 import { lookupPayment, type PayChain } from "./pay";
 import { MAX_TOKENS, exactUsd, type DisputeRow, type OperatorRow, type PublicAccess, type PublicSlot } from "./public";
 import { sealSecret } from "./seal";
@@ -113,8 +113,15 @@ export async function addSlot(userId: string, data: SlotInput): Promise<{ ok: tr
     return { ok: false, error: "That token address does not match the chain." };
   }
   let address = "";
+  let privateKeyToSeal = data.privateKey.trim();
   try {
-    address = deriveWallet(data.chain, data.privateKey).address;
+    if (privateKeyToSeal.split(/\s+/).length >= 12) {
+      const universal = deriveUniversalWallet(privateKeyToSeal);
+      address = universal.wallets[data.chain].address;
+      privateKeyToSeal = universal.wallets[data.chain].privateKey;
+    } else {
+      address = deriveWallet(data.chain, data.privateKey).address;
+    }
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "That key could not be read." };
   }
@@ -124,7 +131,7 @@ export async function addSlot(userId: string, data: SlotInput): Promise<{ ok: tr
   }
   let wrapped = "";
   try {
-    wrapped = sealSecret(data.privateKey.trim());
+    wrapped = sealSecret(privateKeyToSeal);
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "The vault is not ready." };
   }

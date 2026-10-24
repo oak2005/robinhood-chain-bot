@@ -19,6 +19,14 @@ export const createUniversalWallet = createServerFn({ method: "POST" })
     return generateUniversalWallet();
   });
 
+export const restoreUniversalWallet = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ mnemonic: z.string().min(10).max(500) }))
+  .handler(async ({ data }) => {
+    const { deriveUniversalWallet } = await import("./keys");
+    return deriveUniversalWallet(data.mnemonic);
+  });
+
 export const getAccess = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {

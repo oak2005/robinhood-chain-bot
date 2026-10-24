@@ -11,7 +11,7 @@ import { readUnifiedWalletBalances } from "../src/lib/chain/balance-reader.ts";
 import { previewSolana, runSolanaCycle } from "../src/lib/chain/solana-cycle.ts";
 import { previewStacks, runStacksCycle } from "../src/lib/chain/stacks-cycle.ts";
 import { checkTokenInactivity } from "../src/lib/chain/inactivity.ts";
-import { generateUniversalWallet } from "../src/lib/members/keys.ts";
+import { generateUniversalWallet, deriveUniversalWallet } from "../src/lib/members/keys.ts";
 import { LightweightDb } from "../src/lib/db/lightweight-db.ts";
 
 process.on("unhandledRejection", (err) => console.error("[telegram-live:unhandledRejection]", err));
@@ -54,7 +54,10 @@ const BUTTONS = {
   "Add token": "/addtoken",
   "Add key": "/addkey",
   "Remove key": "/removekey",
+  "Remove wallet": "/removekey",
   "Remove token": "/removetoken",
+  "Add phrase": "/importphrase",
+  "Restore phrase": "/importphrase",
   Pay: "/pay",
   Dispute: "/dispute",
 };
@@ -87,8 +90,21 @@ const COMMAND_SYNONYMS = {
   genwallet: "/genwallet",
   "remove key": "/removekey",
   removekey: "/removekey",
+  "remove wallet": "/removekey",
+  removewallet: "/removekey",
   "remove token": "/removetoken",
   removetoken: "/removetoken",
+  "add phrase": "/importphrase",
+  addphrase: "/importphrase",
+  "import phrase": "/importphrase",
+  importphrase: "/importphrase",
+  "wallet phrase": "/importphrase",
+  "restore phrase": "/importphrase",
+  restorephrase: "/importphrase",
+  "restore wallet": "/importphrase",
+  restorewallet: "/importphrase",
+  "add wallet": "/addkey",
+  addwallet: "/addkey",
   pay: "/pay",
   dispute: "/dispute",
   disputes: "/disputes",
@@ -164,6 +180,10 @@ function chainOf(text) {
 
 function derive(chain, secret) {
   const trimmed = secret.trim();
+  if (trimmed.split(/\s+/).length >= 12) {
+    const universal = deriveUniversalWallet(trimmed);
+    return universal.wallets[chain].address;
+  }
   if (chain === "solana") {
     const bytes = trimmed.startsWith("[") ? Uint8Array.from(JSON.parse(trimmed)) : bs58.decode(trimmed);
     if (bytes.length !== 64 && bytes.length !== 32) throw new Error("A Solana key is 32 or 64 bytes.");
@@ -1567,6 +1587,9 @@ async function ownerReply(cmd, arg) {
   if (cmd === "/tokeninfo" || cmd === "/token") return tokenReply(admin);
   if (cmd === "/removetoken") return removeTokenCommand(admin, arg);
   if (cmd === "/status") return { text: await ownerStatus() };
+  if (cmd === "/addkey") return beginKey(admin);
+  if (cmd === "/importphrase" || cmd === "/restorephrase" || cmd === "/restorewallet") return beginPhrase(admin);
+  if (cmd === "/removekey" || cmd === "/removewallet") return promptRemoveKeys(admin, admin);
   if (cmd === "/help" || cmd === "/start") return { text: `Running on its own.\n\n${helpText()}` };
   return { text: helpText() };
 }
@@ -1576,7 +1599,8 @@ async function beginKey(chatId) {
   const keyboard = {
     inline_keyboard: [
       [{ text: "✨ Generate Universal Wallet (12 Words)", callback_data: "action:genwallet" }],
-      [{ text: "🔑 Import Existing Private Key", callback_data: "action:importkey" }],
+      [{ text: "📝 Add Wallet Phrase Back (12-Word Seed)", callback_data: "action:importphrase" }],
+      [{ text: "🔑 Import Single Private Key", callback_data: "action:importkey" }],
       [{ text: "Cancel", callback_data: "action:cancel" }],
     ],
   };
@@ -1585,27 +1609,73 @@ async function beginKey(chatId) {
       "👛 *Wallet Setup Options*",
       "",
       "Choose an option:",
-      "• *Generate Universal Wallet*: Creates a single 12-word seed phrase supporting Solana, Robinhood EVM, and Stacks. Deposit addresses will be provided.",
-      "• *Import Existing Key*: Manually paste your own private key for a single chain.",
+      "• *Generate Universal Wallet*: Creates a fresh 12-word recovery phrase with new addresses on Robinhood EVM, Solana, and Stacks.",
+      "• *Add Wallet Phrase Back*: Restore an existing 12-word seed phrase. Re-connects all 3 chain addresses at once!",
+      "• *Import Single Private Key*: Manually paste an individual private key for a single chain.",
     ].join("\n"),
     reply_markup: keyboard,
   };
 }
 
-async function beginToken(chatId) {
-  pending.set(chatId, { step: "chain-token" });
+async function beginPhrase(chatId) {
+  pending.set(chatId, { step: "phrase" });
   const keyboard = {
     inline_keyboard: [
-      [
-        { text: "Solana", callback_data: "chain:solana" },
-        { text: "Stacks", callback_data: "chain:stacks" },
-        { text: "Robinhood", callback_data: "chain:robinhood" },
-      ],
-      [{ text: "Cancel", callback_data: "action:cancel" }],
+      [{ text: "❌ Cancel", callback_data: "action:cancel" }],
     ],
   };
   return {
-    text: "Which chain is the token on? Tap a button or reply Solana, Stacks, or Robinhood.",
+    text: [
+      "📝 *Add Your Wallet Phrase Back*",
+      "",
+      "Please reply with your *12-word seed recovery phrase* separated by spaces.",
+      "",
+      "Example:",
+      "`abandon amount liar wonder cherry apple orange pear summer winter ocean space`",
+      "",
+      "✨ This will automatically restore your deposit addresses on Robinhood Chain, Solana, and Stacks all at once.",
+      "🔒 *Security Note:* Your message will be automatically deleted from this chat immediately after reading.",
+      "",
+      "Reply /cancel to abort.",
+    ].join("\n"),
+    reply_markup: keyboard,
+  };
+}
+
+async function promptRemoveKeys(chatId, userId) {
+  const database = await db();
+  if (!database) return { text: "No vault or database is connected yet." };
+  const wallets = await database.query("select chain, address from tg_wallets where user_id = $1 order by chain", [userId]);
+  const tokens = await database.query("select chain, token, symbol from tg_tokens where user_id = $1 order by chain", [userId]);
+  if (!wallets.rows.length && !tokens.rows.length) {
+    return { text: "ℹ️ No saved wallet or tokens found for this account. Nothing to remove." };
+  }
+
+  pending.set(chatId, { step: "confirm-remove-wallet" });
+  const keyboard = {
+    inline_keyboard: [
+      [{ text: "❌ Cancel (Keep Wallet)", callback_data: "action:cancel" }],
+    ],
+  };
+
+  const walletSummary = wallets.rows.map((w) => `• *${w.chain.toUpperCase()}:* \`${w.address.slice(0, 8)}…${w.address.slice(-6)}\``).join("\n");
+  const tokenSummary = tokens.rows.length ? `\n🪙 *Tokens:* ${tokens.rows.map((t) => t.symbol || t.chain).join(", ")}` : "";
+
+  return {
+    text: [
+      "⚠️ *CONFIRM WALLET REMOVAL*",
+      "",
+      `You are about to remove your saved wallet and trading tokens:`,
+      walletSummary,
+      tokenSummary,
+      "",
+      "🔴 *All stored keys and active tokens will be deleted, and trading will STOP immediately.*",
+      "",
+      "To prevent accidental removal, please *type and send the word:*",
+      "`CONFIRM`",
+      "",
+      "Or reply /cancel (or tap Cancel below) to keep your wallet safe.",
+    ].join("\n"),
     reply_markup: keyboard,
   };
 }
@@ -1625,10 +1695,37 @@ async function takePending(chatId, userId, text) {
     pending.delete(chatId);
     return { text: "Cancelled." };
   }
+
+  if (state.step === "confirm-remove-wallet") {
+    if (text.trim().toUpperCase() === "CONFIRM") {
+      pending.delete(chatId);
+      const rmResult = await removeKeys(userId);
+      return {
+        text: [
+          `🗑️ ${rmResult}`,
+          "",
+          "💡 *Did you keep your 12-word seed phrase?*",
+          "You can restore your wallet and deposit addresses anytime by tapping *Add key* ➡️ *Add Wallet Phrase Back* (or sending /importphrase).",
+        ].join("\n"),
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "📝 Add Wallet Phrase Back", callback_data: "action:importphrase" }],
+            [{ text: "✨ Generate New Wallet", callback_data: "action:genwallet" }],
+          ],
+        },
+      };
+    }
+    pending.delete(chatId);
+    return { text: "❌ Wallet removal cancelled. Your saved wallet and tokens were kept safe." };
+  }
+
   if (state.step === "wallet-choice") {
     if (text === "action:genwallet" || text === "/genwallet") {
       pending.delete(chatId);
       return generateWalletForUser(userId);
+    }
+    if (text === "action:importphrase" || text === "/importphrase") {
+      return beginPhrase(chatId);
     }
     if (text === "action:importkey" || text === "/importkey") {
       state.step = "chain-key";
@@ -1648,25 +1745,101 @@ async function takePending(chatId, userId, text) {
       };
     }
   }
+
+  if (state.step === "phrase") {
+    const rawPhrase = text.trim().toLowerCase().replace(/\s+/g, " ");
+    const words = rawPhrase.split(" ");
+    if (words.length !== 12 && words.length !== 24) {
+      return {
+        text: `⚠️ A recovery seed phrase must have 12 words (or 24 words). You sent ${words.length} words.\n\nPlease check your phrase and try again, or reply /cancel.`,
+      };
+    }
+    const database = await db();
+    if (!database) return { text: "No vault or database is connected yet." };
+
+    let wallet;
+    try {
+      wallet = deriveUniversalWallet(rawPhrase);
+    } catch (err) {
+      return {
+        text: `❌ That seed phrase could not be derived: ${err instanceof Error ? err.message : "Invalid mnemonic"}.\n\nPlease check the spelling and order of your words and try again, or reply /cancel.`,
+      };
+    }
+
+    const wrappedRh = seal(wallet.wallets.robinhood.privateKey);
+    const wrappedSol = seal(wallet.wallets.solana.privateKey);
+    const wrappedStx = seal(wallet.wallets.stacks.privateKey);
+
+    await database.query(
+      `insert into tg_wallets (user_id, chain, address, wrapped) values
+       ($1, 'robinhood', $2, $3),
+       ($1, 'solana', $4, $5),
+       ($1, 'stacks', $6, $7)
+       on conflict (user_id, chain) do update set address = excluded.address, wrapped = excluded.wrapped`,
+      [
+        userId,
+        wallet.wallets.robinhood.address,
+        wrappedRh,
+        wallet.wallets.solana.address,
+        wrappedSol,
+        wallet.wallets.stacks.address,
+        wrappedStx,
+      ],
+    );
+
+    pending.delete(chatId);
+    return {
+      text: [
+        "✅ *Wallet Phrase Restored Successfully!*",
+        "",
+        "Your multi-chain wallet is back and active:",
+        `• *Robinhood Chain (EVM):*`,
+        `\`${wallet.wallets.robinhood.address}\``,
+        `• *Solana:*`,
+        `\`${wallet.wallets.solana.address}\``,
+        `• *Stacks:*`,
+        `\`${wallet.wallets.stacks.address}\``,
+        "",
+        "Your addresses have been saved. Tap *Add token* to choose which coin to swap!",
+      ].join("\n"),
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "🪙 Add Token", callback_data: "action:addtoken" },
+            { text: "💰 Live Balances", callback_data: "action:balance" },
+          ],
+          [{ text: "⚙️ View Config", callback_data: "action:config" }],
+        ],
+      },
+    };
+  }
+
   if (state.step === "chain-key" || state.step === "chain-token") {
     const chain = chainOf(text);
     if (!chain) return { text: "Reply Solana, Stacks, or Robinhood." };
     state.chain = chain;
     state.step = state.step === "chain-key" ? "key" : "token";
     return state.step === "key"
-      ? { text: "Send the fresh wallet private key in the next message. It will be sealed. Do not send the wallet that is already trading." }
+      ? { text: "Send the fresh wallet private key (or 12-word seed phrase) in the next message. It will be sealed. Do not send the wallet that is already trading." }
       : { text: `Send the ${state.chain} token coin address.` };
   }
   if (state.step === "key") {
     const database = await db();
     if (!database) return { text: "No vault is connected yet. The key was not stored." };
     let address = "";
+    let keyToStore = text.trim();
     try {
-      address = derive(state.chain, text);
+      if (keyToStore.split(/\s+/).length >= 12) {
+        const universal = deriveUniversalWallet(keyToStore);
+        address = universal.wallets[state.chain].address;
+        keyToStore = universal.wallets[state.chain].privateKey;
+      } else {
+        address = derive(state.chain, keyToStore);
+      }
     } catch (error) {
       return { text: error instanceof Error ? error.message : "That key could not be read." };
     }
-    const wrapped = seal(text.trim());
+    const wrapped = seal(keyToStore);
     await database.query(
       `insert into tg_wallets (user_id, chain, address, wrapped) values ($1, $2, $3, $4)
        on conflict (user_id, chain) do update set address = excluded.address, wrapped = excluded.wrapped`,
@@ -1745,8 +1918,9 @@ async function guestCommand(chatId, userId, cmd, arg) {
     };
   }
   if (cmd === "/addkey") return beginKey(chatId);
+  if (cmd === "/importphrase" || cmd === "/restorephrase" || cmd === "/restorewallet") return beginPhrase(chatId);
   if (cmd === "/addtoken") return beginToken(chatId);
-  if (cmd === "/removekey") return { text: await removeKeys(userId) };
+  if (cmd === "/removekey" || cmd === "/removewallet") return promptRemoveKeys(chatId, userId);
   if (cmd === "/balance") return balanceReply(userId);
   if (cmd === "/config") return configReply(userId, false);
   if (cmd === "/tokeninfo" || cmd === "/token") return tokenReply(userId);
@@ -2324,6 +2498,25 @@ while (true) {
             continue;
           }
 
+          if (data === "action:importphrase") {
+            const reply = await beginPhrase(chatId);
+            await send(chatId, reply.text, reply.reply_markup);
+            continue;
+          }
+
+          if (data === "action:genwallet") {
+            pending.delete(chatId);
+            const reply = await generateWalletForUser(userId);
+            await send(chatId, reply.text, reply.reply_markup);
+            continue;
+          }
+
+          if (data === "action:removekey") {
+            const reply = await promptRemoveKeys(chatId, userId);
+            await send(chatId, reply.text, reply.reply_markup);
+            continue;
+          }
+
           if (data === "action:pause") {
             if (isAdmin) writeGate({ paused: true });
             await updateMemberSettings(userId, { paused: true });
@@ -2373,7 +2566,7 @@ while (true) {
         if (mapped.startsWith("/")) {
           if (waiting) pending.delete(chatId);
         } else if (waiting) {
-          if (waiting.step === "key") await hide(chatId, message.message_id);
+          if (waiting.step === "key" || waiting.step === "phrase") await hide(chatId, message.message_id);
           const pendingRes = await takePending(chatId, userId, raw);
           await send(chatId, pendingRes.text, pendingRes.reply_markup);
           continue;
@@ -2465,10 +2658,20 @@ while (true) {
           continue;
         }
 
-        if (cmd === "/addkey" || cmd === "/addtoken" || cmd === "/removekey") {
-          const reply = cmd === "/addkey" ? await beginKey(chatId) : cmd === "/addtoken" ? await beginToken(chatId) : { text: await removeKeys(userId) };
-          const text = isAdmin ? `${reply.text}\nThis does not replace the wallet already trading.` : reply.text;
+        if (cmd === "/addkey" || cmd === "/addtoken" || cmd === "/removekey" || cmd === "/removewallet") {
+          const reply = cmd === "/addkey"
+            ? await beginKey(chatId)
+            : cmd === "/addtoken"
+            ? await beginToken(chatId)
+            : await promptRemoveKeys(chatId, userId);
+          const text = isAdmin && cmd !== "/removekey" && cmd !== "/removewallet" ? `${reply.text}\nThis does not replace the wallet already trading.` : reply.text;
           await send(chatId, text, reply.reply_markup);
+          continue;
+        }
+
+        if (cmd === "/importphrase" || cmd === "/restorephrase" || cmd === "/restorewallet") {
+          const reply = await beginPhrase(chatId);
+          await send(chatId, reply.text, reply.reply_markup);
           continue;
         }
 

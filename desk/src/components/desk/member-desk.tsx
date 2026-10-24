@@ -13,6 +13,7 @@ import {
   raiseDispute,
   removeSlot,
   resolveDispute,
+  restoreUniversalWallet,
 } from "@/lib/members/api";
 import {
   DONATION_USD,
@@ -61,9 +62,13 @@ export function MemberDesk() {
   const [symbol, setSymbol] = useState("");
   const [interval, setIntervalKey] = useState<Interval>("30m");
   const [tradeRange, setTradeRange] = useState<TradeRange>("5-20");
-  const [walletMode, setWalletMode] = useState<"generate" | "import">("generate");
+  const [walletMode, setWalletMode] = useState<"generate" | "restore" | "import">("generate");
   const [universalWallet, setUniversalWallet] = useState<UniversalWalletResult | null>(null);
   const [generatingWallet, setGeneratingWallet] = useState(false);
+  const [restorePhrase, setRestorePhrase] = useState("");
+  const [restoringPhrase, setRestoringPhrase] = useState(false);
+  const [slotToRemove, setSlotToRemove] = useState<{ id: string; symbol: string; chain: string } | null>(null);
+  const [removeConfirmText, setRemoveConfirmText] = useState("");
   const [copiedItem, setCopiedItem] = useState<string>("");
   const [privateKey, setPrivateKey] = useState("");
   const [freshAck, setFreshAck] = useState(false);
@@ -187,9 +192,30 @@ export function MemberDesk() {
     }
   }
 
+  async function onRestoreWalletPhrase() {
+    setError("");
+    const cleaned = restorePhrase.trim().toLowerCase().replace(/\s+/g, " ");
+    const words = cleaned.split(" ");
+    if (words.length !== 12 && words.length !== 24) {
+      setError(`Recovery phrase must contain 12 words (or 24 words). You entered ${words.length} words.`);
+      return;
+    }
+    setRestoringPhrase(true);
+    try {
+      const wallet = await restoreUniversalWallet({ data: { mnemonic: cleaned } });
+      setUniversalWallet(wallet);
+      setPrivateKey(wallet.wallets[chain].privateKey);
+      setFreshAck(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not verify that 12-word recovery phrase.");
+    } finally {
+      setRestoringPhrase(false);
+    }
+  }
+
   function handleChainChange(newChain: Chain) {
     setChain(newChain);
-    if (walletMode === "generate" && universalWallet) {
+    if ((walletMode === "generate" || walletMode === "restore") && universalWallet) {
       setPrivateKey(universalWallet.wallets[newChain].privateKey);
     }
   }
@@ -206,12 +232,14 @@ export function MemberDesk() {
       setError(
         walletMode === "generate"
           ? "Please confirm that you have saved your 12-word seed phrase."
+          : walletMode === "restore"
+          ? "Please confirm that you have verified your 12-word recovery seed phrase."
           : "Tick the fresh-wallet warning before the key is accepted.",
       );
       return;
     }
     const finalKey =
-      walletMode === "generate" && universalWallet
+      (walletMode === "generate" || walletMode === "restore") && universalWallet
         ? universalWallet.wallets[chain].privateKey
         : privateKey.trim();
 
@@ -219,6 +247,8 @@ export function MemberDesk() {
       setError(
         walletMode === "generate"
           ? "Please click 'Generate Universal Wallet' first to create your addresses."
+          : walletMode === "restore"
+          ? "Please enter and verify your 12-word recovery seed phrase first."
           : "Please enter your wallet private key.",
       );
       return;
@@ -244,6 +274,9 @@ export function MemberDesk() {
       setAccess(result.access);
       if (walletMode === "import") {
         setPrivateKey("");
+      }
+      if (walletMode === "restore") {
+        setRestorePhrase("");
       }
       setToken("");
       setFreshAck(false);
@@ -306,34 +339,87 @@ export function MemberDesk() {
           />
           <div className="space-y-3">
             <h2 className="font-display text-xl text-fg">{"Tokens " + access.slots.length + " of " + MAX_TOKENS}</h2>
-            {access.slots.map((slot) => (
-              <div key={slot.id} className="flex items-center justify-between gap-3 rounded-2xl border border-line bg-surface p-3">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <p className="font-medium text-fg">{slot.symbol || NAMES[slot.chain]}</p>
-                    <span className="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] text-muted font-medium">
-                      {NAMES[slot.chain]}
-                    </span>
+            {access.slots.map((slot) => {
+              const isConfirming = slotToRemove?.id === slot.id;
+              return (
+                <div key={slot.id} className="rounded-2xl border border-line bg-surface p-3 space-y-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <p className="font-medium text-fg">{slot.symbol || NAMES[slot.chain]}</p>
+                        <span className="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] text-muted font-medium">
+                          {NAMES[slot.chain]}
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted mt-1">
+                        <span className="font-mono">{short(slot.address)}</span>
+                        <span>·</span>
+                        <span className="rounded bg-surface-2 px-1.5 py-0.5 text-fg">{slot.interval}</span>
+                        <span>·</span>
+                        <span className="rounded bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 font-medium text-emerald-400">
+                          ${slot.tradeRange || "5-20"} / trade
+                        </span>
+                      </div>
+                    </div>
+                    {!isConfirming ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSlotToRemove({ id: slot.id, symbol: slot.symbol || NAMES[slot.chain], chain: slot.chain });
+                          setRemoveConfirmText("");
+                        }}
+                        className="min-h-11 rounded-full border border-line px-3 text-sm text-fg hover:border-danger hover:text-danger transition"
+                      >
+                        Remove
+                      </button>
+                    ) : null}
                   </div>
-                  <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted mt-1">
-                    <span className="font-mono">{short(slot.address)}</span>
-                    <span>·</span>
-                    <span className="rounded bg-surface-2 px-1.5 py-0.5 text-fg">{slot.interval}</span>
-                    <span>·</span>
-                    <span className="rounded bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 font-medium text-emerald-400">
-                      ${slot.tradeRange || "5-20"} / trade
-                    </span>
-                  </div>
+
+                  {isConfirming ? (
+                    <div className="rounded-2xl border border-danger/40 bg-danger/5 p-3 space-y-2 mt-2">
+                      <p className="text-xs font-semibold text-danger">
+                        ⚠️ Remove this wallet slot ({slot.symbol || NAMES[slot.chain]})? Trading will stop.
+                      </p>
+                      <p className="text-[11px] text-muted">
+                        To confirm removal, please type <strong>CONFIRM</strong> below:
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={removeConfirmText}
+                          onChange={(e) => setRemoveConfirmText(e.target.value)}
+                          placeholder="Type CONFIRM"
+                          className="min-h-10 flex-1 rounded-xl border border-danger/40 bg-bg px-3 text-xs text-fg placeholder:text-subtle focus:outline-none focus:border-danger uppercase tracking-wider font-mono"
+                          autoFocus
+                        />
+                        <button
+                          type="button"
+                          disabled={removeConfirmText.trim().toUpperCase() !== "CONFIRM" || busy}
+                          onClick={() => {
+                            void onRemove(slot.id);
+                            setSlotToRemove(null);
+                            setRemoveConfirmText("");
+                          }}
+                          className="min-h-10 rounded-xl bg-danger px-4 text-xs font-semibold text-white disabled:opacity-40 transition"
+                        >
+                          Confirm
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSlotToRemove(null);
+                            setRemoveConfirmText("");
+                          }}
+                          className="min-h-10 rounded-xl border border-line px-3 text-xs text-muted hover:text-fg transition"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => void onRemove(slot.id)}
-                  className="min-h-11 rounded-full border border-line px-3 text-sm text-fg hover:border-danger hover:text-danger transition"
-                >
-                  Remove
-                </button>
-              </div>
-            ))}
+              );
+            })}
             {access.slots.length === 0 ? <p className="text-sm text-subtle">No token yet. The month has to be paid first.</p> : null}
           </div>
           {access.slots.length < MAX_TOKENS ? (
@@ -434,6 +520,15 @@ export function MemberDesk() {
                       }`}
                     >
                       ✨ Generate Wallet
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setWalletMode("restore")}
+                      className={`px-3 py-1 rounded-lg font-medium transition ${
+                        walletMode === "restore" ? "bg-accent text-accent-fg shadow-sm" : "text-muted hover:text-fg"
+                      }`}
+                    >
+                      📝 Add Phrase Back
                     </button>
                     <button
                       type="button"
@@ -551,6 +646,76 @@ export function MemberDesk() {
                       </div>
                     )}
                   </div>
+                ) : walletMode === "restore" ? (
+                  <div className="space-y-3">
+                    <div className="space-y-3 rounded-3xl border border-line bg-surface p-4">
+                      <div>
+                        <p className="font-semibold text-fg text-sm flex items-center gap-1.5">
+                          <span>📝</span> Restore 12-Word Recovery Phrase
+                        </p>
+                        <p className="text-xs text-muted mt-1">
+                          Paste the 12-word recovery seed phrase you previously saved. It will restore your universal multi-chain deposit addresses for Solana, Robinhood, and Stacks.
+                        </p>
+                      </div>
+                      <div className="space-y-2">
+                        <textarea
+                          rows={2}
+                          value={restorePhrase}
+                          onChange={(e) => setRestorePhrase(e.target.value)}
+                          placeholder="word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12"
+                          className="w-full rounded-2xl border border-line bg-bg p-3 text-xs font-mono text-fg placeholder:text-subtle focus:outline-none focus:border-accent resize-none"
+                        />
+                        <button
+                          type="button"
+                          disabled={restoringPhrase || restorePhrase.trim().split(/\s+/).length < 12}
+                          onClick={() => void onRestoreWalletPhrase()}
+                          className="min-h-10 px-4 rounded-full bg-accent text-accent-fg text-xs font-semibold hover:opacity-90 transition disabled:opacity-50 flex items-center gap-2"
+                        >
+                          {restoringPhrase ? "Verifying..." : "✓ Verify & Restore Wallet Phrase"}
+                        </button>
+                      </div>
+                      {universalWallet && (
+                        <div className="space-y-2 pt-2 border-t border-line/40">
+                          <p className="text-xs font-semibold text-emerald-400">
+                            ✓ Wallet Phrase Verified! Deposit Addresses:
+                          </p>
+                          {(["solana", "robinhood", "stacks"] as const).map((c) => {
+                            const isCurrent = chain === c;
+                            const addr = universalWallet.wallets[c].address;
+                            return (
+                              <div
+                                key={c}
+                                className={`rounded-2xl p-2.5 transition text-xs border ${
+                                  isCurrent
+                                    ? "bg-accent/5 border-accent/40"
+                                    : "bg-bg/40 border-line/60"
+                                }`}
+                              >
+                                <div className="flex items-center justify-between mb-1">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="font-semibold text-fg">{NAMES[c]}</span>
+                                    {isCurrent ? (
+                                      <span className="rounded bg-accent text-accent-fg text-[10px] px-1.5 py-0.2 font-semibold">
+                                        Selected Chain
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => copy(addr, c)}
+                                    className="text-[11px] text-accent hover:underline font-medium"
+                                  >
+                                    {copiedItem === c ? "✓ Copied!" : "Copy Address"}
+                                  </button>
+                                </div>
+                                <p className="font-mono text-[11px] text-muted break-all select-all">{addr}</p>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 ) : (
                   <label className="block space-y-2">
                     <span className="text-sm text-muted">Private key</span>
@@ -576,6 +741,8 @@ export function MemberDesk() {
                 <span>
                   {walletMode === "generate"
                     ? "I have written down and saved my 12-word recovery seed phrase. I will only deposit the trading amount into this address."
+                    : walletMode === "restore"
+                    ? "I confirm this is my recovery seed phrase and I understand trading operations will execute using this wallet."
                     : "This is a fresh wallet, not my main wallet. I will keep only the trading amount in it. Do not use the wallet that is already running."}
                 </span>
               </label>

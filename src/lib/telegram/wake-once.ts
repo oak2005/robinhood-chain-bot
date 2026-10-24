@@ -17,7 +17,10 @@ const BUTTONS: Record<string, string> = {
   "Add token": "/addtoken",
   "Add key": "/addkey",
   "Remove key": "/removekey",
+  "Remove wallet": "/removekey",
   "Remove token": "/removetoken",
+  "Add phrase": "/importphrase",
+  "Restore phrase": "/importphrase",
   Pay: "/pay",
 };
 
@@ -41,8 +44,16 @@ const COMMAND_SYNONYMS: Record<string, string> = {
   addkey: "/addkey",
   "remove key": "/removekey",
   removekey: "/removekey",
+  "remove wallet": "/removekey",
+  removewallet: "/removekey",
   "remove token": "/removetoken",
   removetoken: "/removetoken",
+  "add phrase": "/importphrase",
+  addphrase: "/importphrase",
+  "import phrase": "/importphrase",
+  importphrase: "/importphrase",
+  "restore phrase": "/importphrase",
+  restorephrase: "/importphrase",
   pay: "/pay",
 };
 
@@ -126,8 +137,9 @@ export async function setupBotMenu(token: string) {
     { command: "stop", description: "Emergency stop trading" },
     { command: "interval", description: "Set trade interval (10m, 20m, 30m, 1h)" },
     { command: "addkey", description: "Add wallet private key" },
+    { command: "importphrase", description: "Add wallet phrase back (12-word seed)" },
     { command: "addtoken", description: "Add token coin address" },
-    { command: "removekey", description: "Remove saved wallet and tokens" },
+    { command: "removekey", description: "Remove saved wallet and tokens (requires CONFIRM)" },
     { command: "removetoken", description: "Remove a saved token" },
     { command: "pay", description: "Pay for access ($20/30 days)" },
     { command: "help", description: "How to use Inactivity Trade" },
@@ -316,8 +328,14 @@ function guestReply(cmd: string): string {
   if (cmd === "/pause" || cmd === "/resume" || cmd === "/stop" || cmd === "/emergency_stop" || cmd === "/interval") {
     return "This account cannot pause or stop the running swaps.";
   }
-  if (cmd === "/addkey" || cmd === "/addtoken" || cmd === "/removekey") {
-    return "Tap Add key. The next message should be a fresh wallet private key, not the wallet already trading. Then tap Add token.";
+  if (cmd === "/importphrase" || cmd === "/restorephrase" || cmd === "/restorewallet") {
+    return "Tap Add key, then select Add Wallet Phrase Back to restore your 12-word seed phrase.";
+  }
+  if (cmd === "/addkey" || cmd === "/addtoken") {
+    return "Tap Add key. The next message should be a fresh wallet private key or 12-word seed phrase, not the wallet already trading. Then tap Add token.";
+  }
+  if (cmd === "/removekey" || cmd === "/removewallet") {
+    return "Tap Remove key to delete your saved wallet and tokens. You will be prompted to type CONFIRM to prevent accidental deletion.";
   }
   if (cmd === "/balance") {
     return "No wallet is saved for this Telegram account yet. Tap Add key.";

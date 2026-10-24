@@ -27,7 +27,7 @@ export function generateUniversalWallet(): UniversalWalletResult {
 }
 
 export function deriveUniversalWallet(mnemonic: string): UniversalWalletResult {
-  const trimmed = mnemonic.trim();
+  const trimmed = mnemonic.trim().toLowerCase().replace(/\s+/g, " ");
   const seed = bip39.mnemonicToSeedSync(trimmed);
 
   // EVM / Robinhood
