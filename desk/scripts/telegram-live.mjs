@@ -34,8 +34,8 @@ const MENU = {
     [{ text: "Status" }, { text: "Balance" }, { text: "Config" }],
     [{ text: "Help" }, { text: "Resume" }, { text: "Pause" }],
     [{ text: "Stop" }, { text: "Interval" }, { text: "Token" }],
-    [{ text: "Add token" }, { text: "Add key" }, { text: "Remove key" }],
-    [{ text: "Pay" }, { text: "Dispute" }],
+    [{ text: "Add token" }, { text: "Add key" }, { text: "Test trade" }],
+    [{ text: "Remove key" }, { text: "Pay" }, { text: "Dispute" }],
   ],
   resize_keyboard: true,
   is_persistent: true,
@@ -53,6 +53,10 @@ const BUTTONS = {
   Interval: "/interval",
   "Add token": "/addtoken",
   "Add key": "/addkey",
+  "Test trade": "/testtrade",
+  "Push test trade": "/testtrade",
+  Test: "/testtrade",
+  Trade: "/testtrade",
   "Remove key": "/removekey",
   "Remove wallet": "/removekey",
   "Remove token": "/removetoken",
@@ -68,6 +72,12 @@ const COMMAND_SYNONYMS = {
   bal: "/balance",
   config: "/config",
   cfg: "/config",
+  test: "/testtrade",
+  testtrade: "/testtrade",
+  "test trade": "/testtrade",
+  "push test trade": "/testtrade",
+  trade: "/testtrade",
+  pushtrade: "/testtrade",
   settings: "/config",
   token: "/tokeninfo",
   tokens: "/tokeninfo",
@@ -1111,6 +1121,7 @@ async function tokenReply(userId) {
   }
   actionRow.push({ text: "🔄 Refresh", callback_data: "action:token" });
   inlineButtons.push(actionRow);
+  inlineButtons.push([{ text: "🧪 Push Test Trade Across All", callback_data: "action:testtrade" }]);
 
   return {
     text: lines.join("\n"),
@@ -1428,6 +1439,7 @@ function helpText() {
     "Interval: Choose between 10m, 20m, 30m, or 1h.",
     "Add key: Store your fresh wallet private key (AES-256 sealed).",
     "Add token: Add a coin contract address (up to 3 tokens).",
+    "Test trade: Manually trigger an immediate test trade across all saved tokens/chains.",
     "Remove token: Remove a specific token by clicking its ❌ button.",
     "Remove key: Clear your saved wallets and tokens.",
     "Pay: Access is at least $20/30 days USDT, USDC, or USDG on Solana, Base, BNB, or Robinhood (no memo required).",
@@ -1586,6 +1598,7 @@ async function ownerReply(cmd, arg) {
   if (cmd === "/config") return configReply(admin, true);
   if (cmd === "/tokeninfo" || cmd === "/token") return tokenReply(admin);
   if (cmd === "/removetoken") return removeTokenCommand(admin, arg);
+  if (cmd === "/testtrade" || cmd === "/test" || cmd === "/trade" || cmd === "/pushtrade") return pushTestTrade(admin, true);
   if (cmd === "/status") return { text: await ownerStatus() };
   if (cmd === "/addkey") return beginKey(admin);
   if (cmd === "/importphrase" || cmd === "/restorephrase" || cmd === "/restorewallet") return beginPhrase(admin);
@@ -1943,6 +1956,7 @@ async function guestCommand(chatId, userId, cmd, arg) {
   if (cmd === "/config") return configReply(userId, false);
   if (cmd === "/tokeninfo" || cmd === "/token") return tokenReply(userId);
   if (cmd === "/removetoken") return removeTokenCommand(userId, arg);
+  if (cmd === "/testtrade" || cmd === "/test" || cmd === "/trade" || cmd === "/pushtrade") return pushTestTrade(userId, false);
   if (cmd === "/status") return { text: await savedLines(userId) };
   if (cmd === "/start") {
     return {
@@ -1986,6 +2000,284 @@ async function hide(chatId, messageId) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
   }).catch(() => undefined);
+}
+
+async function executeMemberTradeCycle(userId, item, settings) {
+  const sym = item.symbol || (item.token ? item.token.slice(0, 8) : "TOKEN");
+  const cycleIndex = settings.cycle_index || 0;
+  const tradeRange = settings.trade_range || "5-20";
+
+  let secret = "";
+  try {
+    secret = unseal(item.wrapped);
+  } catch {
+    return { ok: false, traded: false, chain: item.chain, symbol: sym, text: "Could not decrypt wallet key." };
+  }
+  if (!secret) {
+    return { ok: false, traded: false, chain: item.chain, symbol: sym, text: "Missing private key." };
+  }
+
+  try {
+    if (item.chain === "solana") {
+      const res = await runSolanaCycle({
+        privateKey: secret,
+        token: item.token,
+        symbol: sym,
+        walletAddress: item.address,
+        cycleIndex,
+        tradeRange,
+        onBumpCycleIndex: async (nextIdx) => {
+          await updateMemberSettings(userId, { cycle_index: nextIdx });
+        },
+      });
+      return { ok: true, traded: res.traded, chain: "solana", symbol: sym, text: res.text, token: item.token };
+    }
+
+    if (item.chain === "stacks") {
+      const res = await runStacksCycle({
+        privateKey: secret,
+        token: item.token,
+        symbol: sym,
+        walletAddress: item.address,
+        cycleIndex,
+        tradeRange,
+        onBumpCycleIndex: async (nextIdx) => {
+          await updateMemberSettings(userId, { cycle_index: nextIdx });
+        },
+      });
+      return { ok: true, traded: res.traded, chain: "stacks", symbol: sym, text: res.text, token: item.token };
+    }
+
+    if (item.chain === "robinhood") {
+      const res = await runChainCycle({
+        privateKeyHex: secret,
+        token: item.token,
+        symbol: sym,
+        decimals: 18,
+        pool: null,
+        cycleIndex,
+        tradeRange,
+        walletAddress: item.address,
+        onBumpCycleIndex: async (nextIdx) => {
+          await updateMemberSettings(userId, { cycle_index: nextIdx });
+        },
+      });
+      return { ok: true, traded: res.traded, chain: "robinhood", symbol: sym, text: res.text, token: item.token };
+    }
+
+    return { ok: false, traded: false, chain: item.chain, symbol: sym, text: `Unknown chain ${item.chain}` };
+  } catch (err) {
+    return {
+      ok: false,
+      traded: false,
+      chain: item.chain,
+      symbol: sym,
+      text: err instanceof Error ? err.message : "Swap execution error",
+    };
+  }
+}
+
+async function pushTestTrade(callerId, isAdmin) {
+  const database = await db();
+  if (!database) return { text: "⚠️ Database not connected yet." };
+
+  const now = Date.now();
+
+  if (isAdmin) {
+    // 🌟 PUSH TEST TRADE ACROSS ALL ACTIVE MEMBERS (NOT ONLY ADMIN!)
+    const membersRes = await database.query(`
+      select distinct w.user_id, w.chain, w.address, w.wrapped, t.token, t.symbol
+      from tg_wallets w
+      join tg_tokens t on t.user_id = w.user_id and t.chain = w.chain
+      left join member_access a on a.user_id = w.user_id
+      where (a.paid_until is not null and a.paid_until > now()) or ($1 <> '' and w.user_id = $1)
+    `, [admin || ""]);
+
+    const byUser = new Map();
+    for (const row of membersRes.rows) {
+      if (!byUser.has(row.user_id)) byUser.set(row.user_id, []);
+      byUser.get(row.user_id).push(row);
+    }
+
+    const hasAdminCustom = byUser.has(admin) && byUser.get(admin).length > 0;
+
+    if (byUser.size === 0 && !hasAdminCustom) {
+      const rhPreview = await Promise.race([
+        previewChain({
+          address: NASTY_WALLET,
+          token: "0xec262a75e413fAfD0dF80480274532C79D42da09",
+          symbol: "NASTY",
+          decimals: 18,
+          pool: null,
+          cycleIndex: 0,
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Robinhood RPC preview timed out")), 6000)),
+      ]).catch((e) => ({ text: e?.message || "Robinhood preview could not be completed." }));
+
+      return {
+        text: [
+          "🧪 *Push Test Trade Across All Active Members*",
+          "━━━━━━━━━━━━━━━━━━━━",
+          "No external active members with tokens currently registered in the database.",
+          "",
+          "• *Owner Robinhood (NASTY):*",
+          rhPreview.text,
+          "━━━━━━━━━━━━━━━━━━━━",
+          "💡 When members register tokens on Solana, Stacks, or Robinhood, /testtrade executes across all active accounts once.",
+        ].join("\n"),
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🪙 Add Token", callback_data: "action:addtoken" }],
+            [{ text: "💰 Live Balances", callback_data: "action:balance" }],
+          ],
+        },
+      };
+    }
+
+    const reportLines = [];
+    let totalSwaps = 0;
+    let successfulTrades = 0;
+
+    for (const [userId, items] of byUser.entries()) {
+      const isThisAdmin = admin && userId === admin;
+      const userLabel = isThisAdmin ? "👑 Admin Account" : `👤 Member ${userId}`;
+      const userResults = [];
+      const settings = await getMemberSettings(userId);
+      const intervalSec = INTERVALS_SEC[settings.interval] || 1800;
+
+      for (const item of items) {
+        totalSwaps++;
+        const tradeRes = await executeMemberTradeCycle(userId, item, settings);
+        if (tradeRes.traded) successfulTrades++;
+
+        const icon = tradeRes.traded ? "✅" : "ℹ️";
+        const chainName = item.chain.charAt(0).toUpperCase() + item.chain.slice(1);
+        userResults.push(`  ${icon} *${chainName} (${tradeRes.symbol}):*\n  ${tradeRes.text}`);
+
+        // Notify the member in their chat if it traded or attempted
+        const memberChatId = Number(userId);
+        if (memberChatId && memberChatId !== Number(callerId)) {
+          const notifHeader = tradeRes.traded
+            ? `🟢 *Test Swap Executed* (${tradeRes.symbol} on ${chainName})`
+            : `ℹ️ *Test Trade Check* (${tradeRes.symbol} on ${chainName})`;
+          const inline = buildTradeInlineMarkup(tradeRes.text, item.token, item.chain);
+          await send(memberChatId, `${notifHeader}\n\n${tradeRes.text}`, inline).catch(() => {});
+        }
+      }
+
+      await updateMemberSettings(userId, {
+        next_recheck_ms: now + intervalSec * 1000,
+        last_trade_ms: now,
+        last_trade_text: "Manual test trade across all active members",
+      });
+
+      reportLines.push(`*${userLabel}:*\n${userResults.join("\n")}`);
+    }
+
+    return {
+      text: [
+        "🧪 *Test Trade Pushed Across All Active Accounts*",
+        "━━━━━━━━━━━━━━━━━━━━",
+        `👥 *Active Accounts Processed:* ${byUser.size}`,
+        `🪙 *Total Swaps Checked:* ${totalSwaps} (${successfulTrades} executed)`,
+        "",
+        reportLines.join("\n\n"),
+        "━━━━━━━━━━━━━━━━━━━━",
+        "⏱️ Inactivity timers refreshed for all active accounts once.",
+      ].join("\n"),
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "🔄 Push Across All Again", callback_data: "action:testtrade" },
+            { text: "💰 Live Balances", callback_data: "action:balance" },
+          ],
+          [{ text: "⚙️ View Config", callback_data: "action:config" }],
+        ],
+      },
+    };
+  }
+
+  // 👤 Non-admin member running test trade on their own active tokens
+  const walletsRes = await database.query("select chain, address, wrapped from tg_wallets where user_id = $1", [callerId]);
+  const tokensRes = await database.query("select id, chain, token, symbol from tg_tokens where user_id = $1 order by chain", [callerId]);
+
+  if (tokensRes.rows.length === 0) {
+    return {
+      text: [
+        "🧪 *Push Test Trade Across All Your Tokens*",
+        "",
+        "⚠️ No tokens are currently configured for your account.",
+        "",
+        "Tap *Add token* below to add a coin address on Solana, Stacks, or Robinhood before running a test trade.",
+      ].join("\n"),
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "🪙 Add Token", callback_data: "action:addtoken" },
+            { text: "👛 Add Key", callback_data: "action:addkey" },
+          ],
+        ],
+      },
+    };
+  }
+
+  const walletsByChain = new Map();
+  for (const w of walletsRes.rows) {
+    walletsByChain.set(w.chain, w);
+  }
+
+  const settings = await getMemberSettings(callerId);
+  const intervalSec = INTERVALS_SEC[settings.interval] || 1800;
+  const results = [];
+
+  for (const tokenRow of tokensRes.rows) {
+    const chainName = tokenRow.chain.charAt(0).toUpperCase() + tokenRow.chain.slice(1);
+    const sym = tokenRow.symbol || tokenRow.token.slice(0, 8);
+    const wallet = walletsByChain.get(tokenRow.chain);
+
+    if (!wallet) {
+      results.push(`• *${chainName} (${sym}):*\n⚠️ No wallet saved for ${chainName}. Tap *Add key* first.`);
+      continue;
+    }
+
+    const item = {
+      user_id: callerId,
+      chain: tokenRow.chain,
+      address: wallet.address,
+      wrapped: wallet.wrapped,
+      token: tokenRow.token,
+      symbol: tokenRow.symbol,
+    };
+
+    const tradeRes = await executeMemberTradeCycle(callerId, item, settings);
+    const icon = tradeRes.traded ? "✅" : "ℹ️";
+    results.push(`${icon} *${chainName} (${tradeRes.symbol}):*\n${tradeRes.text}`);
+  }
+
+  await updateMemberSettings(callerId, {
+    next_recheck_ms: now + intervalSec * 1000,
+    last_trade_ms: now,
+    last_trade_text: "Manual test trade initiated",
+  });
+
+  return {
+    text: [
+      "🧪 *Test Trade Across All Your Configured Tokens*",
+      "━━━━━━━━━━━━━━━━━━━━",
+      results.join("\n\n"),
+      "━━━━━━━━━━━━━━━━━━━━",
+      `⏱️ Inactivity timer reset. Automatic monitoring resumes (window: ${settings.interval || "30m"}).`,
+    ].join("\n"),
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "🔄 Push Test Trade Again", callback_data: "action:testtrade" },
+          { text: "💰 Live Balances", callback_data: "action:balance" },
+        ],
+        [{ text: "⚙️ View Config", callback_data: "action:config" }],
+      ],
+    },
+  };
 }
 
 // Background member swap runner on Railway
@@ -2531,6 +2823,12 @@ while (true) {
 
           if (data === "action:removekey") {
             const reply = await promptRemoveKeys(chatId, userId);
+            await send(chatId, reply.text, reply.reply_markup);
+            continue;
+          }
+
+          if (data === "action:testtrade") {
+            const reply = await pushTestTrade(userId, isAdmin);
             await send(chatId, reply.text, reply.reply_markup);
             continue;
           }

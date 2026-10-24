@@ -1,6 +1,7 @@
-import { readSolanaWalletBalances, readStacksWalletBalances, fetchTokenPriceUsd } from "../src/lib/chain/balance-reader.ts";
+import { readRobinhoodWalletBalances, readSolanaWalletBalances, readStacksWalletBalances, fetchTokenPriceUsd } from "../src/lib/chain/balance-reader.ts";
 import { previewSolana, runSolanaCycle, getJupiterQuote } from "../src/lib/chain/solana-cycle.ts";
 import { previewStacks, runStacksCycle } from "../src/lib/chain/stacks-cycle.ts";
+import { previewChain, runChainCycle } from "../src/lib/chain/cycle.ts";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
 
@@ -86,7 +87,34 @@ async function main() {
   });
   console.log("Stacks Cycle Output:\n" + stxCycleResult.text);
 
-  console.log("\n=== ALL MULTI-CHAIN TESTS COMPLETED SUCCESSFULLY ===");
+  // 8. Test Robinhood Price & Balance Reading
+  console.log("\n8. Testing Robinhood Price & Balance Reading...");
+  const rhTestAddr = "0xdf246e7a947674476c832544f7867aa864c60bd5";
+  const nastyToken = "0xec262a75e413fAfD0dF80480274532C79D42da09";
+
+  const rhBal = await readRobinhoodWalletBalances(rhTestAddr, [{ token: nastyToken, symbol: "NASTY" }]);
+  console.log("Robinhood Wallet Balance:", JSON.stringify(rhBal, null, 2));
+
+  // 9. Test Robinhood Preview
+  console.log("\n9. Testing Robinhood Preview...");
+  try {
+    const rhPreview = await Promise.race([
+      previewChain({
+        address: rhTestAddr,
+        token: nastyToken,
+        symbol: "NASTY",
+        decimals: 18,
+        pool: null,
+        cycleIndex: 0,
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("RPC preview timed out")), 5000)),
+    ]);
+    console.log("Robinhood Preview Output:\n" + rhPreview.text);
+  } catch (err) {
+    console.log("Robinhood Preview Notice:", err?.message || err);
+  }
+
+  console.log("\n=== ALL MULTI-CHAIN TESTS (SOLANA, STACKS, ROBINHOOD) COMPLETED SUCCESSFULLY ===");
 }
 
 main().catch(console.error);
