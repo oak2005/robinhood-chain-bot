@@ -171,6 +171,14 @@ function tradeGatePlugin(): Plugin {
       res.setHeader("content-type", "application/json");
       res.end(body);
     });
+    middlewares.use("/api/bot-logs", (_req, res) => {
+      let logs = "No logs yet.";
+      try {
+        logs = readFileSync("/tmp/bot-recent-logs.txt", "utf8");
+      } catch {}
+      res.setHeader("content-type", "text/plain; charset=utf-8");
+      res.end(logs);
+    });
   };
   return {
     name: "trade-gate",

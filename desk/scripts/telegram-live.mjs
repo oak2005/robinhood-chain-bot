@@ -1785,6 +1785,8 @@ async function send(chatId, text, customMarkup = null) {
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
       console.error(`[telegram-live:send] Failed to send to ${chatId} (${res.status}):`, errText);
+    } else {
+      console.log(`[telegram-live:send] ✅ Successfully sent reply to ${chatId}`);
     }
   } catch (err) {
     console.error(`[telegram-live:send] Network error sending to ${chatId}:`, err?.message || err);

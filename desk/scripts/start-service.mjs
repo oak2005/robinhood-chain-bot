@@ -37,13 +37,22 @@ let botChild = null;
 let shuttingDown = false;
 let botRestarts = 0;
 
+const LOG_FILE = "/tmp/bot-recent-logs.txt";
+const logBuffer = [];
+
 function formatLog(prefix, data) {
   const lines = data.toString().split("\n");
   for (const line of lines) {
     if (line.trim()) {
+      const entry = `[${new Date().toISOString()}] ${prefix} ${line}`;
       process.stdout.write(`${prefix} ${line}\n`);
+      logBuffer.push(entry);
+      if (logBuffer.length > 100) logBuffer.shift();
     }
   }
+  try {
+    fs.writeFileSync(LOG_FILE, logBuffer.join("\n"));
+  } catch {}
 }
 
 // 2. Start Web Server (Vite preview on PORT)
