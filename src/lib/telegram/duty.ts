@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { runChainCycle, type V4Pool } from "../chain/cycle.ts";
+import { checkRobinhoodInactivity } from "../chain/inactivity.ts";
 import { INACTIVITY_INTERVALS, type IntervalKey } from "../engine/types.ts";
 
 const ROOT = process.env.STILLMARK_ROOT || "/workspace";
@@ -163,6 +164,22 @@ export async function runDueTrade(wait = false): Promise<string> {
     if (!state.token || !state.nextRecheck || now < state.nextRecheck) return "";
     const secret = readSecret();
     if (!secret) return "";
+
+    const key = state.config?.interval ?? "30m";
+    const windowSec = INACTIVITY_INTERVALS[key] ?? 1800;
+
+    // Check actual on-chain inactivity for this token
+    const inactivity = await checkRobinhoodInactivity(state.token.address, windowSec).catch(() => null);
+    if (inactivity && !inactivity.isInactive) {
+      const waitMs = Math.max(30, inactivity.remainingSec) * 1000;
+      state.nextRecheck = now + waitMs;
+      fs.writeFileSync(STATE_PATH, JSON.stringify(state));
+      const elapsedM = Math.floor(inactivity.elapsedSec / 60);
+      const waitM = Math.ceil(inactivity.remainingSec / 60);
+      console.log(`[duty:runDueTrade] ⏳ Token ${state.token.symbol} is active on-chain (trade ${elapsedM}m ago). Next quiet check in ~${waitM}m.`);
+      return "watching";
+    }
+
     state.nextRecheck = now + SKIP_RECHECK_MS;
     let text = "";
     let traded = false;
@@ -180,15 +197,13 @@ export async function runDueTrade(wait = false): Promise<string> {
       halt = result.halt;
       if (result.traded) {
         state.lastTradeMs = now;
-        const key = state.config?.interval ?? "10m";
-        state.nextRecheck = now + (INACTIVITY_INTERVALS[key] ?? 600) * 1000;
+        state.nextRecheck = now + windowSec * 1000;
       } else if (result.halt) {
         state.active = true;
         state.halted = false;
         state.nextRecheck = now + BUY_RETRY_MS;
       } else if (result.retry === "interval") {
-        const key = state.config?.interval ?? "10m";
-        state.nextRecheck = now + (INACTIVITY_INTERVALS[key] ?? 600) * 1000;
+        state.nextRecheck = now + windowSec * 1000;
       }
       text = result.text;
     } catch (error) {
@@ -211,7 +226,9 @@ export async function runDueTrade(wait = false): Promise<string> {
     if (!repeat) {
       try {
         const admin = fs.readFileSync(ADMIN_PATH, "utf8").trim();
-        const notificationText = traded ? text : `⚠️ ${state.token?.symbol || "Token"} cycle swap failed on Robinhood Chain.\n${text}`;
+        const notificationText = traded
+          ? `🟢 *Robinhood Inactivity Swap Executed* (${state.token?.symbol || "Token"})\n\n${text}\n\n⏱️ Triggered after ${key} of on-chain inactivity.`
+          : `⚠️ ${state.token?.symbol || "Token"} cycle swap failed on Robinhood Chain.\n${text}`;
         if (admin) await send(Number(admin), notificationText, state.token?.address);
       } catch (sendErr) {
         console.error("[duty:runDueTrade] Failed to send Telegram notification:", sendErr instanceof Error ? sendErr.message : sendErr);

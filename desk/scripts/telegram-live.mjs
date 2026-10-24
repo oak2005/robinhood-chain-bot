@@ -10,6 +10,7 @@ import { clearRecovery, previewChain, runChainCycle } from "../src/lib/chain/cyc
 import { readUnifiedWalletBalances } from "../src/lib/chain/balance-reader.ts";
 import { previewSolana, runSolanaCycle } from "../src/lib/chain/solana-cycle.ts";
 import { previewStacks, runStacksCycle } from "../src/lib/chain/stacks-cycle.ts";
+import { checkTokenInactivity } from "../src/lib/chain/inactivity.ts";
 import { generateUniversalWallet } from "../src/lib/members/keys.ts";
 
 process.on("unhandledRejection", (err) => console.error("[telegram-live:unhandledRejection]", err));
@@ -56,6 +57,57 @@ const BUTTONS = {
   Pay: "/pay",
   Dispute: "/dispute",
 };
+
+const COMMAND_SYNONYMS = {
+  status: "/status",
+  balance: "/balance",
+  bal: "/balance",
+  config: "/config",
+  cfg: "/config",
+  settings: "/config",
+  token: "/tokeninfo",
+  tokens: "/tokeninfo",
+  tokeninfo: "/tokeninfo",
+  coin: "/tokeninfo",
+  help: "/help",
+  start: "/start",
+  resume: "/resume",
+  pause: "/pause",
+  stop: "/emergency_stop",
+  emergency_stop: "/emergency_stop",
+  interval: "/interval",
+  scope: "/interval",
+  range: "/interval",
+  "add token": "/addtoken",
+  addtoken: "/addtoken",
+  "add key": "/addkey",
+  addkey: "/addkey",
+  importkey: "/addkey",
+  genwallet: "/genwallet",
+  "remove key": "/removekey",
+  removekey: "/removekey",
+  "remove token": "/removetoken",
+  removetoken: "/removetoken",
+  pay: "/pay",
+  dispute: "/dispute",
+  disputes: "/disputes",
+  cancel: "/cancel",
+};
+
+function normalizeCommand(input) {
+  if (!input) return "";
+  const trimmed = input.trim();
+  if (BUTTONS[trimmed]) return BUTTONS[trimmed];
+  const lower = trimmed.toLowerCase();
+  if (COMMAND_SYNONYMS[lower]) return COMMAND_SYNONYMS[lower];
+  if (trimmed.startsWith("/")) return trimmed;
+  const parts = trimmed.split(/\s+/);
+  const firstLower = parts[0]?.toLowerCase();
+  if (COMMAND_SYNONYMS[firstLower]) {
+    return `${COMMAND_SYNONYMS[firstLower]} ${parts.slice(1).join(" ")}`.trim();
+  }
+  return trimmed;
+}
 
 const INTERVALS = ["10m", "20m", "30m", "1h"];
 const INTERVALS_SEC = { "10m": 600, "20m": 1200, "30m": 1800, "1h": 3600 };
@@ -609,6 +661,26 @@ async function savedLines(userId) {
   const when = settings.paused ? "Trading is paused." : mins <= 0 ? "Next swap is due." : `Next swap in about ${mins} min.`;
 
   const lines = [statusLine, when, accessLine, intervalLine];
+
+  for (const tokenRow of tokens.rows) {
+    try {
+      const intervalSec = INTERVALS_SEC[settings.interval] || 1800;
+      const act = await checkTokenInactivity({
+        chain: tokenRow.chain,
+        token: tokenRow.token,
+        intervalSec,
+      });
+      if (act) {
+        if (!act.isInactive) {
+          const elapsedM = Math.floor(act.elapsedSec / 60);
+          const remainM = Math.ceil(act.remainingSec / 60);
+          lines.push(`📊 ${tokenRow.symbol || tokenRow.chain} Activity: ACTIVE (trade ${elapsedM}m ago). Next swap in ~${remainM}m if quiet.`);
+        } else {
+          lines.push(`📊 ${tokenRow.symbol || tokenRow.chain} Activity: INACTIVE (>= ${Math.floor(intervalSec / 60)}m quiet). Swap is due!`);
+        }
+      }
+    } catch {}
+  }
 
   for (const row of wallets.rows) {
     lines.push(`Wallet (${row.chain}): ${row.address}`);
@@ -1170,8 +1242,8 @@ console.log(`[telegram-live] Telegram token verified (admin: ${admin ? admin : "
 writeGate({ paused: readGate().paused === true, interval: readGate().interval || "" });
 
 function buildTradeInlineMarkup(text, tokenAddress, chain = "robinhood") {
-  const sellMatch = (text || "").match(/Sell\s*\n\s*([0-9a-zA-Z]{40,90})/);
-  const buyMatch = (text || "").match(/Buy\s*\n\s*([0-9a-zA-Z]{40,90})/);
+  const sellMatch = (text || "").match(/Sell(?:\s*\n\s*|[\s:]+)([0-9a-zA-Z]{40,90})/i);
+  const buyMatch = (text || "").match(/Buy(?:\s*\n\s*|[\s:]+)([0-9a-zA-Z]{40,90})/i);
   const rows = [];
   const txButtons = [];
 
@@ -1261,6 +1333,21 @@ async function ownerStatus() {
     const mins = Math.max(0, Math.ceil(((state.nextRecheck ?? 0) - Date.now()) / 60000));
     const when = mins <= 0 ? "Next swap is due." : `Next swap in about ${mins} min.`;
     const lines = ["Running on its own.", when, state.token?.symbol ?? "NASTY", state.token?.address ?? ""];
+    if (state.token?.address) {
+      try {
+        const intervalSec = INTERVALS_SEC[state.config?.interval || "30m"] || 1800;
+        const act = await checkRobinhoodInactivity(state.token.address, intervalSec);
+        if (act) {
+          if (!act.isInactive) {
+            const elapsedM = Math.floor(act.elapsedSec / 60);
+            const remainM = Math.ceil(act.remainingSec / 60);
+            lines.push(`📊 On-chain Activity: ACTIVE (trade ${elapsedM}m ago). Next swap in ~${remainM}m if quiet.`);
+          } else {
+            lines.push(`📊 On-chain Activity: INACTIVE (>= ${Math.floor(intervalSec / 60)}m quiet). Swap is due!`);
+          }
+        }
+      } catch {}
+    }
     let previewText = "";
     if (state.token?.address) {
       try {
@@ -1691,18 +1778,18 @@ async function checkMemberSwaps() {
     if (!database) return;
     const now = Date.now();
 
-    // Query active paid members with saved wallets and tokens
+    // Query active paid members with saved wallets and tokens (admin is always active)
     const membersRes = await database.query(`
       select distinct w.user_id, w.chain, w.address, w.wrapped, t.token, t.symbol
       from tg_wallets w
       join tg_tokens t on t.user_id = w.user_id and t.chain = w.chain
-      join member_access a on a.user_id = w.user_id
-      where a.paid_until is not null and a.paid_until > now()
-    `);
+      left join member_access a on a.user_id = w.user_id
+      where (a.paid_until is not null and a.paid_until > now()) or ($1 <> '' and w.user_id = $1)
+    `, [admin || ""]);
 
     const byUser = new Map();
     for (const row of membersRes.rows) {
-      if (admin && row.user_id === admin && row.chain === "robinhood") continue; // NASTY owner wallet on Robinhood runs on GitHub Actions ONLY!
+      if (admin && row.user_id === admin && row.chain === "robinhood" && row.address?.toLowerCase() === NASTY_WALLET.toLowerCase()) continue;
       if (!byUser.has(row.user_id)) byUser.set(row.user_id, []);
       byUser.get(row.user_id).push(row);
     }
@@ -1717,6 +1804,31 @@ async function checkMemberSwaps() {
         const nextRecheck = now + intervalSec * 1000;
 
         for (const item of items) {
+          // Check on-chain inactivity first for this token
+          let inactivity = null;
+          try {
+            inactivity = await checkTokenInactivity({
+              chain: item.chain,
+              token: item.token,
+              intervalSec,
+            });
+          } catch (inactivityErr) {
+            console.warn(`[checkMemberSwaps] Inactivity check notice for ${item.symbol || item.token}:`, inactivityErr?.message || inactivityErr);
+          }
+
+          if (inactivity && !inactivity.isInactive) {
+            const remainingMs = Math.max(30, inactivity.remainingSec) * 1000;
+            const elapsedMins = Math.floor(inactivity.elapsedSec / 60);
+            const remainMins = Math.ceil(inactivity.remainingSec / 60);
+            console.log(`[checkMemberSwaps] ⏳ Token ${item.symbol || item.token} on ${item.chain} is ACTIVE on-chain (trade ${elapsedMins}m ago). Next quiet check in ~${remainMins}m.`);
+            await updateMemberSettings(userId, {
+              next_recheck_ms: now + remainingMs,
+            });
+            continue; // Token is active; do NOT trade!
+          }
+
+          console.log(`[checkMemberSwaps] 🟢 Inactivity confirmed for ${item.symbol || item.token} on ${item.chain} (>= ${Math.floor(intervalSec / 60)}m quiet window). Running cycle swap...`);
+
           if (item.chain === "robinhood") {
             let secret = "";
             try {
@@ -1750,8 +1862,16 @@ async function checkMemberSwaps() {
               if (result.traded) {
                 const chatId = Number(userId);
                 if (chatId) {
+                  const notifText = [
+                    `🟢 *Inactivity Swap Executed* (${item.symbol || "Token"} on Robinhood Chain)`,
+                    "",
+                    result.text,
+                    "",
+                    `⏱️ Triggered after ${settings.interval || "30m"} of on-chain inactivity.`,
+                    `Next quiet check in about ${Math.ceil(intervalSec / 60)} min.`,
+                  ].join("\n");
                   const inline = buildTradeInlineMarkup(result.text, item.token, "robinhood");
-                  await send(chatId, result.text, inline).catch(() => {});
+                  await send(chatId, notifText, inline).catch((e) => console.error(`[checkMemberSwaps] Send trade notification failed:`, e?.message || e));
                 }
               } else {
                 const chatId = Number(userId);
@@ -1823,8 +1943,16 @@ async function checkMemberSwaps() {
               if (result.traded) {
                 const chatId = Number(userId);
                 if (chatId) {
+                  const notifText = [
+                    `🟢 *Inactivity Swap Executed* (${item.symbol || "Token"} on Solana)`,
+                    "",
+                    result.text,
+                    "",
+                    `⏱️ Triggered after ${settings.interval || "30m"} of on-chain inactivity.`,
+                    `Next quiet check in about ${Math.ceil(intervalSec / 60)} min.`,
+                  ].join("\n");
                   const inline = buildTradeInlineMarkup(result.text, item.token, "solana");
-                  await send(chatId, result.text, inline).catch(() => {});
+                  await send(chatId, notifText, inline).catch((e) => console.error(`[checkMemberSwaps] Send trade notification failed:`, e?.message || e));
                 }
               } else {
                 const chatId = Number(userId);
@@ -1896,8 +2024,16 @@ async function checkMemberSwaps() {
               if (result.traded) {
                 const chatId = Number(userId);
                 if (chatId) {
+                  const notifText = [
+                    `🟢 *Inactivity Swap Executed* (${item.symbol || "Token"} on Stacks)`,
+                    "",
+                    result.text,
+                    "",
+                    `⏱️ Triggered after ${settings.interval || "30m"} of on-chain inactivity.`,
+                    `Next quiet check in about ${Math.ceil(intervalSec / 60)} min.`,
+                  ].join("\n");
                   const inline = buildTradeInlineMarkup(result.text, item.token, "stacks");
-                  await send(chatId, result.text, inline).catch(() => {});
+                  await send(chatId, notifText, inline).catch((e) => console.error(`[checkMemberSwaps] Send trade notification failed:`, e?.message || e));
                 }
               } else {
                 const chatId = Number(userId);
@@ -2171,18 +2307,22 @@ while (true) {
       const userId = String(message?.from?.id ?? "");
       if (!raw || !chatId || !userId) continue;
       const waiting = pending.get(chatId);
-      const mapped = BUTTONS[raw] ?? raw;
+      const mapped = normalizeCommand(raw);
       console.log(`[telegram-live] Received message from ${userId}: "${raw}" (command: "${mapped}")`);
       try {
-        if (waiting && !BUTTONS[raw] && !mapped.startsWith("/status") && mapped !== "/cancel" && !mapped.startsWith("/add") && !mapped.startsWith("/remove") && !mapped.startsWith("/help") && !mapped.startsWith("/start") && !mapped.startsWith("/pay") && !mapped.startsWith("/dispute")) {
-          if (waiting.step === "key") await hide(chatId, message.message_id);
-          const pendingRes = await takePending(chatId, userId, raw);
-          await send(chatId, pendingRes.text, pendingRes.reply_markup);
-          continue;
-        }
         if (mapped === "/cancel") {
           pending.delete(chatId);
           await send(chatId, "Cancelled.");
+          continue;
+        }
+
+        // If user sent a command or button, cancel any stale waiting prompt so they are not trapped
+        if (mapped.startsWith("/")) {
+          if (waiting) pending.delete(chatId);
+        } else if (waiting) {
+          if (waiting.step === "key") await hide(chatId, message.message_id);
+          const pendingRes = await takePending(chatId, userId, raw);
+          await send(chatId, pendingRes.text, pendingRes.reply_markup);
           continue;
         }
 
@@ -2206,7 +2346,21 @@ while (true) {
           continue;
         }
 
-        if (!mapped.startsWith("/")) continue;
+        // Respond helpfully to any unrecognized message instead of dropping it
+        if (!mapped.startsWith("/")) {
+          const fallbackText = [
+            "👋 Welcome to *Inactivity Trade Bot*.",
+            "",
+            "Choose an option from the menu below or tap a button:",
+            "• *Status*: Check swap clock and on-chain activity",
+            "• *Balance*: Check balances",
+            "• *Interval*: Set inactivity window (10m, 20m, 30m, 1h)",
+            "• *Config*: View current strategy setup",
+            "• *Help*: View setup guide and commands",
+          ].join("\n");
+          await send(chatId, fallbackText);
+          continue;
+        }
         const cmd = mapped.split(/\s+/)[0]?.split("@")[0] ?? "";
         const arg = mapped.split(/\s+/)[1] ?? "";
         const isAdmin = admin && userId === admin;

@@ -298,7 +298,9 @@ try {
   if (secretToken) await setupBotMenu(secretToken);
 } catch {}
 
-await (process.env.STILLMARK_SKIP_DRAIN === "1" ? Promise.resolve() : drainCommands().catch(() => undefined));
+// Live Telegram bot runs 24/7 on Railway via telegram-live.mjs.
+// getUpdates polling from GitHub Actions is skipped by default to avoid 409 Conflict.
+await (process.env.STILLMARK_ENABLE_GH_DRAIN === "1" ? drainCommands().catch(() => undefined) : Promise.resolve());
 const line = await runDueTrade(true);
 if (line && line !== "watching") {
   try {
