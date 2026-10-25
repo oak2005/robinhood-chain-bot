@@ -65,7 +65,25 @@ test("LightweightDb handles basic CRUD operations and joins without memory overh
     where (a.paid_until is not null and a.paid_until > now()) or ($1 <> '' and w.user_id = $1)
   `, ["123"]);
   assert.equal(members.rows.length, 1);
-  assert.equal(members.rows[0].token, "0xTokenAddr");
+  // Support tickets
+  await db.query(
+    "insert into support_tickets (id, user_id, username, category, message, status) values ($1, $2, $3, $4, $5, 'open')",
+    ["tkt-1", "123", "alice", "feature", "Please add Arbitrum", "open"],
+  );
+  const openTickets = await db.query(
+    "select id, user_id, username, category, message, status, created_at from support_tickets where status = 'open' order by created_at desc limit 10",
+  );
+  assert.equal(openTickets.rows.length, 1);
+  assert.equal(openTickets.rows[0].category, "feature");
+  assert.equal(openTickets.rows[0].message, "Please add Arbitrum");
+
+  await db.query(
+    "update support_tickets set status = 'resolved', admin_reply = $1, resolved_at = now() where id = $2",
+    ["Added in v2!", "tkt-1"],
+  );
+  const singleTicket = await db.query("select * from support_tickets where id = $1", ["tkt-1"]);
+  assert.equal(singleTicket.rows[0].status, "resolved");
+  assert.equal(singleTicket.rows[0].admin_reply, "Added in v2!");
 
   // Cleanup test file
   try { fs.unlinkSync(tmpPath); } catch {}

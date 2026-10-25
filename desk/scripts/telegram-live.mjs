@@ -36,6 +36,7 @@ const MENU = {
     [{ text: "Stop" }, { text: "Interval" }, { text: "Token" }],
     [{ text: "Add token" }, { text: "Add key" }, { text: "Test trade" }],
     [{ text: "Remove key" }, { text: "Pay" }, { text: "Dispute" }],
+    [{ text: "💬 Support & Feedback" }],
   ],
   resize_keyboard: true,
   is_persistent: true,
@@ -64,6 +65,12 @@ const BUTTONS = {
   "Restore phrase": "/importphrase",
   Pay: "/pay",
   Dispute: "/dispute",
+  Support: "/support",
+  Feedback: "/feature",
+  "Support & Feedback": "/support",
+  "💬 Support & Feedback": "/support",
+  "Feature Request": "/feature",
+  "Report Issue": "/support",
 };
 
 const COMMAND_SYNONYMS = {
@@ -118,6 +125,17 @@ const COMMAND_SYNONYMS = {
   pay: "/pay",
   dispute: "/dispute",
   disputes: "/disputes",
+  support: "/support",
+  feedback: "/feature",
+  feature: "/feature",
+  features: "/feature",
+  request: "/feature",
+  issue: "/support",
+  bug: "/support",
+  contact: "/support",
+  tickets: "/tickets",
+  ticket: "/tickets",
+  reply: "/reply",
   cancel: "/cancel",
 };
 
@@ -273,6 +291,17 @@ async function initDbTables(client) {
     user_note text not null default '',
     status text not null default 'pending',
     admin_note text not null default '',
+    created_at timestamptz not null default now(),
+    resolved_at timestamptz
+  )`);
+  await client.query(`create table if not exists support_tickets (
+    id text primary key,
+    user_id text not null,
+    username text not null default '',
+    category text not null default 'issue',
+    message text not null,
+    status text not null default 'open',
+    admin_reply text not null default '',
     created_at timestamptz not null default now(),
     resolved_at timestamptz
   )`);
@@ -655,6 +684,156 @@ async function listDisputes() {
     "",
     ...res.rows.map((d) => `• #${d.id} | User: ${d.user_id} | ${d.chain.toUpperCase()} | Tx: ${d.tx_hash.slice(0, 10)}…\n  Note: ${d.user_note || "None"}\n  To resolve: /accept ${d.id} or /reject ${d.id}`),
   ].join("\n");
+}
+
+async function createSupportTicket(userId, username = "", category = "issue", message = "") {
+  const database = await db();
+  if (!database) return { text: "Database is not connected. Cannot submit ticket right now." };
+  const cleanMsg = (message || "").trim();
+  if (!cleanMsg) {
+    return { text: "Please include a message describing your issue or feature request." };
+  }
+
+  const ticketId = `tkt_${randomUUID().slice(0, 8)}`;
+  const catLabel = category === "feature" ? "💡 Feature Request" : category === "issue" ? "🐛 Bug / Issue" : "💬 Support Message";
+
+  await database.query(
+    "insert into support_tickets (id, user_id, username, category, message, status) values ($1, $2, $3, $4, $5, 'open')",
+    [ticketId, userId, username, category, cleanMsg.slice(0, 2000)],
+  );
+
+  if (admin) {
+    const adminChatId = Number(admin);
+    const adminText = [
+      `📩 *NEW SUPPORT TICKET* #${ticketId}`,
+      `👤 *User:* \`${userId}\`${username ? ` (@${username})` : ""}`,
+      `🏷️ *Type:* ${catLabel}`,
+      `📝 *Message:*`,
+      cleanMsg,
+      "",
+      `💬 To reply, send: \`/reply ${userId} <your reply>\``,
+      "Or tap below:",
+    ].join("\n");
+
+    const adminMarkup = {
+      inline_keyboard: [
+        [
+          { text: "💬 Reply to User", callback_data: `ticket:reply:${userId}:${ticketId}` },
+          { text: "✅ Close Ticket", callback_data: `ticket:close:${ticketId}` },
+        ],
+      ],
+    };
+    await send(adminChatId, adminText, adminMarkup).catch(() => {});
+  }
+
+  const directContact = process.env.SUPPORT_USERNAME || process.env.TELEGRAM_ADMIN_USERNAME;
+  const directText = directContact ? `\n\nDirect Admin Telegram: @${directContact.replace(/^@/, "")}` : "";
+
+  return {
+    text: [
+      `✅ *Message Delivered to Admin!* (Ticket #${ticketId})`,
+      "",
+      `🏷️ *Category:* ${catLabel}`,
+      `📝 *Your Message:*`,
+      `"${cleanMsg}"`,
+      "",
+      "Your message has been sent directly to the bot admin team.",
+      "As soon as the admin replies, you will receive their response right here in this chat!" + directText,
+    ].join("\n"),
+  };
+}
+
+function supportPrompt(userId) {
+  const directContact = process.env.SUPPORT_USERNAME || process.env.TELEGRAM_ADMIN_USERNAME;
+  const directText = directContact ? `\n• *Direct Admin:* @${directContact.replace(/^@/, "")}` : "";
+
+  return {
+    text: [
+      "💬 *Support, Issues & Feature Requests*",
+      "",
+      "Have a question, encountered an issue, or want to suggest a new feature?",
+      "",
+      "Select an option below to message the admin:",
+      "• 🐛 *Report an Issue:* Bugs, swap errors, or wallet questions",
+      "• 💡 *Request a Feature:* New chains, DEXs, tokens, or strategy options",
+      "• 💬 *Message Admin:* General questions or inquiries" + directText,
+      "",
+      "_(Or simply type `/support <message>` or `/feature <idea>` at any time)_",
+    ].join("\n"),
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "🐛 Report Issue", callback_data: "action:support:issue" },
+          { text: "💡 Request Feature", callback_data: "action:support:feature" },
+        ],
+        [
+          { text: "💬 Message Admin", callback_data: "action:support:message" },
+          { text: "❌ Cancel", callback_data: "action:cancel" },
+        ],
+      ],
+    },
+  };
+}
+
+async function listSupportTickets() {
+  const database = await db();
+  if (!database) return "Database not connected.";
+  const res = await database.query(
+    "select id, user_id, username, category, message, status, created_at from support_tickets where status = 'open' order by created_at desc limit 10",
+  );
+  if (!res.rows.length) return "✅ No open support tickets or feature requests.";
+  return [
+    `📋 *Open Support Tickets & Feature Requests (${res.rows.length}):*`,
+    "",
+    ...res.rows.map((t) => {
+      const typeIcon = t.category === "feature" ? "💡" : "🐛";
+      const u = t.username ? `@${t.username}` : t.user_id;
+      return `• #${t.id} [${typeIcon} ${t.category.toUpperCase()}] From ${u} (\`${t.user_id}\`):\n  "${t.message.slice(0, 150)}"\n  Reply: \`/reply ${t.user_id} <text>\``;
+    }),
+  ].join("\n\n");
+}
+
+async function sendAdminReplyToUser(targetUserId, ticketId, replyText) {
+  const cleanReply = (replyText || "").trim();
+  if (!cleanReply) return "Reply message cannot be empty.";
+  const database = await db();
+
+  const userChatId = Number(targetUserId);
+  if (!userChatId) return `Invalid user ID: ${targetUserId}`;
+
+  const userMsg = [
+    `📬 *Reply from Support Admin* ${ticketId ? `(Ticket #${ticketId})` : ""}:`,
+    "",
+    cleanReply,
+    "",
+    "_You can send another message anytime by tapping Support or using /support._",
+  ].join("\n");
+
+  await send(userChatId, userMsg);
+
+  if (database && ticketId) {
+    await database.query(
+      "update support_tickets set status = 'resolved', admin_reply = $1, resolved_at = now() where id = $2",
+      [cleanReply, ticketId],
+    ).catch(() => {});
+  } else if (database) {
+    await database.query(
+      "update support_tickets set status = 'resolved', admin_reply = $1, resolved_at = now() where user_id = $2 and status = 'open'",
+      [cleanReply, targetUserId],
+    ).catch(() => {});
+  }
+
+  return `✅ Reply delivered to user ${targetUserId}!`;
+}
+
+async function closeSupportTicket(ticketId) {
+  const database = await db();
+  if (!database) return "Database not connected.";
+  await database.query(
+    "update support_tickets set status = 'resolved', resolved_at = now() where id = $1",
+    [ticketId],
+  );
+  return `✅ Ticket #${ticketId} marked closed.`;
 }
 
 async function verifyPayment(userId, txHash) {
@@ -1434,6 +1613,8 @@ async function setupBotMenu() {
     { command: "removetoken", description: "Remove a saved token" },
     { command: "pay", description: "Pay for access ($20/30 days)" },
     { command: "dispute", description: "Raise transaction dispute for admin review" },
+    { command: "support", description: "Report issue or contact admin" },
+    { command: "feature", description: "Request a feature or suggestion" },
     { command: "help", description: "How to use Inactivity Trade" },
   ];
   for (let attempt = 1; attempt <= 5; attempt++) {
@@ -1535,6 +1716,7 @@ function helpText() {
     "Remove key: Clear your saved wallets and tokens.",
     "Pay: Access is at least $20/30 days USDT, USDC, or USDG on Solana, Base, BNB, or Robinhood (no memo required).",
     "Dispute: If a transaction needs manual verification, send /dispute <txHash> to submit to admin.",
+    "Support: Report an issue, ask a question, or request a feature (/support or /feature).",
     "",
     "Everything stays in this chat. Tap buttons below or use the Menu button at the bottom left.",
   ].join("\n");
@@ -1674,6 +1856,8 @@ async function ownerReply(cmd, arg) {
   }
   if (cmd === "/pay") return { text: await payInfoText(admin) };
   if (cmd === "/disputes") return { text: await listDisputes() };
+  if (cmd === "/tickets") return { text: await listSupportTickets() };
+  if (cmd === "/support" || cmd === "/feature" || cmd === "/feedback" || cmd === "/contact") return supportPrompt(admin);
   if (cmd === "/dispute") {
     return {
       text: [
@@ -1816,6 +2000,17 @@ async function takePending(chatId, userId, text) {
   if (text === "/cancel" || text === "action:cancel") {
     pending.delete(chatId);
     return { text: "Cancelled." };
+  }
+
+  if (state.step === "support-message") {
+    pending.delete(chatId);
+    return createSupportTicket(userId, state.username || "", state.category || "issue", text);
+  }
+
+  if (state.step === "admin-reply") {
+    pending.delete(chatId);
+    const result = await sendAdminReplyToUser(state.targetUserId, state.ticketId, text);
+    return { text: result };
   }
 
   if (state.step === "confirm-remove-wallet") {
@@ -2038,6 +2233,9 @@ async function guestCommand(chatId, userId, cmd, arg) {
         "/dispute 0x123...456 sent $20 USDC without memo",
       ].join("\n"),
     };
+  }
+  if (cmd === "/support" || cmd === "/feature" || cmd === "/feedback" || cmd === "/contact") {
+    return supportPrompt(userId);
   }
   if (cmd === "/addkey") return beginKey(chatId);
   if (cmd === "/importphrase" || cmd === "/restorephrase" || cmd === "/restorewallet") return beginPhrase(chatId);
@@ -2778,6 +2976,7 @@ while (true) {
         const cqId = cq.id;
         const chatId = cq.message?.chat?.id;
         const userId = String(cq.from?.id ?? "");
+        const username = cq.from?.username ?? "";
         const data = cq.data || "";
 
         await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
@@ -2858,6 +3057,52 @@ while (true) {
             }
             const disputeId = data.replace("dispute:reject:", "");
             const resText = await resolveDisputeEntry(disputeId, "reject");
+            await send(chatId, resText);
+            continue;
+          }
+
+          if (data.startsWith("action:support:")) {
+            const cat = data.replace("action:support:", "");
+            pending.set(chatId, { step: "support-message", category: cat, username });
+            const catLabel = cat === "feature" ? "💡 Feature Request" : cat === "issue" ? "🐛 Bug / Issue Report" : "💬 Message for Admin";
+            await send(
+              chatId,
+              [
+                `📝 *${catLabel}*`,
+                "",
+                "Please type your message, describe the issue, or share your feature idea below and send it.",
+                "",
+                "Reply /cancel to abort.",
+              ].join("\n"),
+              { inline_keyboard: [[{ text: "❌ Cancel", callback_data: "action:cancel" }]] }
+            );
+            continue;
+          }
+
+          if (data.startsWith("ticket:reply:")) {
+            if (!isAdmin) {
+              await send(chatId, "Only the admin can reply to tickets.");
+              continue;
+            }
+            const parts = data.split(":");
+            const targetUserId = parts[2];
+            const ticketId = parts[3];
+            pending.set(chatId, { step: "admin-reply", targetUserId, ticketId });
+            await send(
+              chatId,
+              `💬 *Replying to User ${targetUserId}* (Ticket #${ticketId}):\n\nPlease type your reply message and send it:`,
+              { inline_keyboard: [[{ text: "❌ Cancel", callback_data: "action:cancel" }]] }
+            );
+            continue;
+          }
+
+          if (data.startsWith("ticket:close:")) {
+            if (!isAdmin) {
+              await send(chatId, "Only the admin can close tickets.");
+              continue;
+            }
+            const ticketId = data.replace("ticket:close:", "");
+            const resText = await closeSupportTicket(ticketId);
             await send(chatId, resText);
             continue;
           }
@@ -2962,6 +3207,7 @@ while (true) {
       const raw = typeof message?.text === "string" ? message.text.trim() : "";
       const chatId = message?.chat?.id;
       const userId = String(message?.from?.id ?? "");
+      const username = message?.from?.username ?? "";
       if (!raw || !chatId || !userId) continue;
       const waiting = pending.get(chatId);
       const mapped = normalizeCommand(raw);
@@ -3060,6 +3306,39 @@ while (true) {
           const action = cmd === "/accept" ? "accept" : "reject";
           const resultText = await resolveDisputeEntry(disputeId, action, note);
           await send(chatId, resultText);
+          continue;
+        }
+
+        if (cmd === "/support" || cmd === "/contact" || cmd === "/issue" || cmd === "/bug" || cmd === "/feature" || cmd === "/request" || cmd === "/feedback") {
+          const defaultCategory = (cmd === "/feature" || cmd === "/request" || cmd === "/feedback") ? "feature" : "issue";
+          const parts = raw.split(/\s+/);
+          const msgBody = parts.slice(1).join(" ").trim();
+          if (!msgBody) {
+            const reply = supportPrompt(userId);
+            await send(chatId, reply.text, reply.reply_markup);
+            continue;
+          }
+          const reply = await createSupportTicket(userId, username, defaultCategory, msgBody);
+          await send(chatId, reply.text, reply.reply_markup);
+          continue;
+        }
+
+        if (isAdmin && cmd === "/tickets") {
+          const text = await listSupportTickets();
+          await send(chatId, text);
+          continue;
+        }
+
+        if (isAdmin && cmd === "/reply") {
+          const parts = raw.split(/\s+/);
+          const targetUserId = parts[1]?.trim();
+          const replyText = parts.slice(2).join(" ").trim();
+          if (!targetUserId || !replyText) {
+            await send(chatId, "Usage: /reply <user_id> <your reply message>");
+            continue;
+          }
+          const res = await sendAdminReplyToUser(targetUserId, null, replyText);
+          await send(chatId, res);
           continue;
         }
 

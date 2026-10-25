@@ -53,6 +53,18 @@ export interface PaymentDispute {
   resolved_at: string | null;
 }
 
+export interface SupportTicket {
+  id: string;
+  user_id: string;
+  username: string;
+  category: string;
+  message: string;
+  status: string;
+  admin_reply: string;
+  created_at: string;
+  resolved_at: string | null;
+}
+
 export interface DbState {
   tg_wallets: TgWallet[];
   tg_tokens: TgToken[];
@@ -60,6 +72,7 @@ export interface DbState {
   used_payments: UsedPayment[];
   member_settings: MemberSetting[];
   payment_disputes: PaymentDispute[];
+  support_tickets: SupportTicket[];
 }
 
 export class LightweightDb {
@@ -75,6 +88,7 @@ export class LightweightDb {
       used_payments: [],
       member_settings: [],
       payment_disputes: [],
+      support_tickets: [],
     };
     this.load();
   }
@@ -90,6 +104,7 @@ export class LightweightDb {
           used_payments: Array.isArray(raw.used_payments) ? raw.used_payments : [],
           member_settings: Array.isArray(raw.member_settings) ? raw.member_settings : [],
           payment_disputes: Array.isArray(raw.payment_disputes) ? raw.payment_disputes : [],
+          support_tickets: Array.isArray(raw.support_tickets) ? raw.support_tickets : [],
         };
       }
     } catch (e) {
@@ -365,6 +380,49 @@ export class LightweightDb {
       if (found) {
         found.status = status;
         found.admin_note = String(adminNote ?? "");
+        found.resolved_at = new Date().toISOString();
+        this.save();
+      }
+      return { rows: [] };
+    }
+
+    // 7. support_tickets
+    if (s.includes("from support_tickets") && s.startsWith("select")) {
+      if (params.length === 1) {
+        const ticketId = String(params[0]);
+        const found = this.state.support_tickets.find((t) => t.id === ticketId);
+        return { rows: found ? [JSON.parse(JSON.stringify(found))] : [] };
+      }
+      const open = this.state.support_tickets
+        .filter((t) => t.status === "open")
+        .sort((a, b) => b.created_at.localeCompare(a.created_at))
+        .slice(0, 10);
+      return { rows: JSON.parse(JSON.stringify(open)) };
+    }
+
+    if (s.startsWith("insert into support_tickets")) {
+      const [id, userId, username, category, message, status] = params;
+      this.state.support_tickets.push({
+        id: String(id),
+        user_id: String(userId),
+        username: String(username ?? ""),
+        category: String(category || "issue"),
+        message: String(message ?? ""),
+        status: String(status || "open"),
+        admin_reply: "",
+        created_at: new Date().toISOString(),
+        resolved_at: null,
+      });
+      this.save();
+      return { rows: [] };
+    }
+
+    if (s.startsWith("update support_tickets set status")) {
+      const [adminReply, ticketId] = params;
+      const found = this.state.support_tickets.find((t) => t.id === String(ticketId));
+      if (found) {
+        found.status = "resolved";
+        found.admin_reply = String(adminReply ?? "");
         found.resolved_at = new Date().toISOString();
         this.save();
       }

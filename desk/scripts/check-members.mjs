@@ -78,6 +78,13 @@ async function run() {
       disputeCount = Number(res.rows[0]?.count || 0);
     } catch {}
 
+    // 7. Check Support Tickets (support_tickets)
+    let ticketCount = 0;
+    try {
+      const res = await pool.query("SELECT COUNT(*) AS count FROM support_tickets WHERE status = 'open'");
+      ticketCount = Number(res.rows[0]?.count || 0);
+    } catch {}
+
     console.log("=========================================");
     console.log("       INACTIVITY TRADE DATABASE AUDIT    ");
     console.log("=========================================");
@@ -88,6 +95,7 @@ async function run() {
     console.log(`🪙 Telegram Configured Tokens:     ${tgTokens.length}`);
     console.log(`🌐 Web App Trading Slots:          ${slotCount}`);
     console.log(`⚠️ Pending Payment Disputes:       ${disputeCount}`);
+    console.log(`📩 Open Support Tickets / Ideas:   ${ticketCount}`);
     console.log("=========================================\n");
 
     if (tgWallets.length > 0) {

@@ -44,6 +44,23 @@ To keep your users' payments, wallets, and settings permanently saved across upd
 | `PORT` | Web port automatically supplied by Railway | `8080` |
 | `BETTER_AUTH_SECRET` | Secret for web desk authentication | auto-generated |
 | `BETTER_AUTH_URL` | Web desk public URL | Railway URL |
+| `SUPPORT_USERNAME` | (Optional) Admin Telegram username shown in support menu | `@yourtelegram` |
+
+---
+
+## Member Support & Feature Requests
+
+Users can communicate issues or request features anytime:
+- **In Bot Menu**: Tapping **`💬 Support & Feedback`** or typing `/support` or `/feature`.
+- **Options**:
+  - `🐛 Report Issue`: For bugs, swap issues, or errors.
+  - `💡 Request Feature`: For proposing new tokens, chains, or DEX integrations.
+  - `💬 Message Admin`: Direct message to the admin.
+
+### Admin Commands (Admin Only):
+- `/tickets` — List all open user support tickets and feature requests.
+- `/reply <user_id> <message>` — Send a direct reply back to a user's Telegram chat.
+- In-chat Buttons — When a ticket arrives, tap **`💬 Reply to User`** or **`✅ Close Ticket`**.
 
 ---
 
