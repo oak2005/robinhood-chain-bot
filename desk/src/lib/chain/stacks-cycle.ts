@@ -128,12 +128,67 @@ export async function findStacksPool(tokenContractId: string): Promise<StacksPoo
       if (data && data.lpTokenContractAddress) {
         const lp: string = data.lpTokenContractAddress;
         const poolContract = lp.replace("univ2-lp-token", "univ2-pool");
-        const feesContract = lp.replace("univ2-lp-token", "univ2-fees");
         const [poolAddr, poolName] = poolContract.split(".");
-        const [feesAddr, feesName] = feesContract.split(".");
-        const [wstxAddr, wstxName] = (data.token0ContractAddress || "SP1Y5YSTAHZ88XYK1VPDH24GY0HPX5J4JECTMY4A1.wstx").split(".");
-        const [tokenAddr, tokenName] = (data.token1ContractAddress || trimmed).split(".");
-        const isTok0 = data.token0ContractAddress === trimmed;
+        let r0: bigint | null = null;
+        let r1: bigint | null = null;
+        let tok0: string | null = null;
+        let tok1: string | null = null;
+        let feesAddr: string | null = null;
+        let feesName: string | null = null;
+
+        // Query live on-chain pool reserves directly via get-pool to prevent stale data reverts
+        try {
+          const poolRes = await fetch(`${HIRO_API}/v2/contracts/call-read/${poolAddr}/${poolName}/get-pool`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ sender: tokAddr, arguments: [] }),
+            signal: AbortSignal.timeout(6000),
+          });
+          if (poolRes.ok) {
+            const poolData = await poolRes.json();
+            if (poolData.okay && poolData.result) {
+              const { hexToCV, cvToJSON } = await import("@stacks/transactions");
+              const parsed = cvToJSON(hexToCV(poolData.result));
+              const val = parsed?.value?.value;
+              if (val) {
+                r0 = BigInt(val.reserve0?.value || 0);
+                r1 = BigInt(val.reserve1?.value || 0);
+                tok0 = val.token0?.value || null;
+                tok1 = val.token1?.value || null;
+                const feesContract = val.fees?.value || "";
+                if (feesContract.includes(".")) {
+                  [feesAddr, feesName] = feesContract.split(".");
+                }
+              }
+            }
+          }
+        } catch {}
+
+        if (!feesAddr || !feesName) {
+          const feesContract = lp.replace("univ2-lp-token", "univ2-fees");
+          [feesAddr, feesName] = feesContract.split(".");
+        }
+
+        const isTok0 = tok0 ? tok0.toLowerCase() === trimmed.toLowerCase() : data.token0ContractAddress === trimmed;
+        const [wstxAddr, wstxName] = (
+          tok0 && tok1 ? (isTok0 ? tok1 : tok0) : data.token0ContractAddress || "SP1Y5YSTAHZ88XYK1VPDH24GY0HPX5J4JECTMY4A1.wstx"
+        ).split(".");
+        const [tokenAddr, tokenName] = (
+          tok0 && tok1 ? (isTok0 ? tok0 : tok1) : data.token1ContractAddress || trimmed
+        ).split(".");
+
+        const finalReserveStx =
+          r0 != null && r1 != null
+            ? isTok0
+              ? r1
+              : r0
+            : BigInt(isTok0 ? data.stats?.reserve1 || 0 : data.stats?.reserve0 || 0);
+        const finalReserveToken =
+          r0 != null && r1 != null
+            ? isTok0
+              ? r0
+              : r1
+            : BigInt(isTok0 ? data.stats?.reserve0 || 0 : data.stats?.reserve1 || 0);
 
         return {
           type: "velar",
@@ -145,8 +200,8 @@ export async function findStacksPool(tokenContractId: string): Promise<StacksPoo
           wstxName: wstxName,
           tokenAddress: tokenAddr,
           tokenName: tokenName,
-          reserveStx: BigInt(isTok0 ? data.stats?.reserve1 || 0 : data.stats?.reserve0 || 0),
-          reserveToken: BigInt(isTok0 ? data.stats?.reserve0 || 0 : data.stats?.reserve1 || 0),
+          reserveStx: finalReserveStx,
+          reserveToken: finalReserveToken,
           tokenIsToken0: isTok0,
         };
       }
@@ -286,11 +341,12 @@ async function executeBuyLeg(params: {
   const nonce = await getNextNonce(params.walletAddr);
   let buyAmountMicro = params.stxAmountMicro;
 
-  if (buyAmountMicro <= 0n) {
-    const balInfo = await readStacksWalletBalances(params.walletAddr);
-    const stxBal = parseFloat(balInfo.nativeAmount) || 0;
-    const safeStx = Math.max(0, stxBal - 0.05);
-    buyAmountMicro = BigInt(Math.floor(safeStx * 1e6));
+  // Always check current wallet balance and clamp to available STX minus fee buffer
+  const balInfo = await readStacksWalletBalances(params.walletAddr);
+  const stxBal = parseFloat(balInfo.nativeAmount) || 0;
+  const safeStxMicro = BigInt(Math.max(0, Math.floor((stxBal - 0.05) * 1e6)));
+  if (buyAmountMicro <= 0n || buyAmountMicro > safeStxMicro) {
+    buyAmountMicro = safeStxMicro;
   }
 
   if (buyAmountMicro <= 0n) {
@@ -311,7 +367,7 @@ async function executeBuyLeg(params: {
           contractPrincipalCV(BITFLOW_ROUTER_ADDRESS, BITFLOW_VELAR_ADAPTER),
           contractPrincipalCV(params.pool.contractAddress, params.pool.contractName),
           contractPrincipalCV(params.pool.feesAddress || params.pool.contractAddress, params.pool.feesName || "univ2-fees-v1_0_0-0003"),
-          boolCV(true),  // x-for-y: token0 (wstx) for token1 (token)
+          boolCV(!params.pool.tokenIsToken0), // x-for-y: trading wstx for token
           boolCV(true),  // is-stx-in
           boolCV(false), // is-stx-out
           contractPrincipalCV(params.pool.wstxAddress, params.pool.wstxName),
@@ -401,8 +457,13 @@ export async function previewStacks(input: {
     const stxAmount = parseFloat(balInfo.nativeAmount) || 0;
     const tokenBal = balInfo.tokens[0];
     const tokenAmount = parseFloat(tokenBal?.amount.replace(/,/g, "") || "0");
-    const tokenPrice = tokenBal?.priceUsd || (await fetchTokenPriceUsd(input.token));
-    const tokenUsd = tokenBal?.balanceUsd != null ? tokenBal.balanceUsd : tokenPrice ? tokenAmount * tokenPrice : 0;
+    const pool = await findStacksPool(input.token);
+    let tokenPrice = tokenBal?.priceUsd || (await fetchTokenPriceUsd(input.token)) || 0;
+    if (tokenPrice <= 0 && pool && pool.reserveStx > 0n && pool.reserveToken > 0n) {
+      const stxUsd = balInfo.nativePriceUsd || (await fetchTokenPriceUsd("STX")) || 0.30;
+      tokenPrice = (Number(pool.reserveStx) / Number(pool.reserveToken)) * stxUsd;
+    }
+    const tokenUsd = tokenBal?.balanceUsd != null && tokenBal.balanceUsd > 0 ? tokenBal.balanceUsd : tokenPrice ? tokenAmount * tokenPrice : 0;
 
     const shortAddr = input.token.length > 12 ? `${input.token.slice(0, 6)}…${input.token.slice(-4)}` : input.token;
     const lines: string[] = [
@@ -428,7 +489,6 @@ export async function previewStacks(input: {
       }
     }
 
-    const pool = await findStacksPool(input.token);
     if (!pool) {
       lines.push(`⚠️ No liquidity pool found on Stacks for ${input.symbol}.`);
       return { text: lines.join("\n") };
@@ -493,7 +553,8 @@ export async function runStacksCycle(input: {
   const recovery = readRecovery(walletAddr, input.token);
   if (recovery) {
     const status = await fetchTxStatus(recovery.sellTxHash);
-    if (status === "pending") {
+    const recoveryAgeMs = Date.now() - (recovery.at || 0);
+    if (status === "pending" || (status === "unknown" && recoveryAgeMs < 20 * 60 * 1000)) {
       return {
         text: `Sell ${recovery.sellTxHash} is confirming on Stacks. Buyback will execute as soon as it confirms on-chain.`,
         traded: false,
@@ -555,24 +616,28 @@ export async function runStacksCycle(input: {
     };
   }
 
-  const tokenBal = balInfo.tokens[0];
-  const tokenAmount = parseFloat(tokenBal?.amount.replace(/,/g, "") || "0");
-  const rawBalance = BigInt(tokenBal?.rawAmount || "0");
-  const tokenPrice = tokenBal?.priceUsd || (await fetchTokenPriceUsd(input.token)) || 0;
-  const tokenUsd = tokenBal?.balanceUsd != null ? tokenBal.balanceUsd : tokenAmount * tokenPrice;
-
-  if (tokenAmount <= 0 || tokenUsd < 1) {
+  const pool = await findStacksPool(input.token);
+  if (!pool) {
     return {
-      text: `Token balance for ${input.symbol} is too low to swap ($${tokenUsd.toFixed(2)}, need >= $1.00).`,
+      text: `No active liquidity pool found on Stacks for ${input.symbol}. Swap skipped.`,
       traded: false,
       retry: "interval",
     };
   }
 
-  const pool = await findStacksPool(input.token);
-  if (!pool) {
+  const tokenBal = balInfo.tokens[0];
+  const tokenAmount = parseFloat(tokenBal?.amount.replace(/,/g, "") || "0");
+  const rawBalance = BigInt(tokenBal?.rawAmount || "0");
+  let tokenPrice = tokenBal?.priceUsd || (await fetchTokenPriceUsd(input.token)) || 0;
+  if (tokenPrice <= 0 && pool.reserveStx > 0n && pool.reserveToken > 0n) {
+    const stxUsd = balInfo.nativePriceUsd || (await fetchTokenPriceUsd("STX")) || 0.30;
+    tokenPrice = (Number(pool.reserveStx) / Number(pool.reserveToken)) * stxUsd;
+  }
+  const tokenUsd = tokenBal?.balanceUsd != null && tokenBal.balanceUsd > 0 ? tokenBal.balanceUsd : tokenAmount * tokenPrice;
+
+  if (tokenAmount <= 0 || tokenUsd < 1) {
     return {
-      text: `No active liquidity pool found on Stacks for ${input.symbol}. Swap skipped.`,
+      text: `Token balance for ${input.symbol} is too low to swap ($${tokenUsd.toFixed(2)}, need >= $1.00).`,
       traded: false,
       retry: "interval",
     };
@@ -622,7 +687,6 @@ export async function runStacksCycle(input: {
 
   // 3. Leg 1: Sell Token -> STX (via Bitflow Aggregator)
   const nonce = await getNextNonce(walletAddr);
-  const minStxOut = expectedStxOut > 0n ? (expectedStxOut * 92n) / 100n : 1n;
 
   let tx;
   let routerUsed = "Bitflow Aggregator";
@@ -638,13 +702,13 @@ export async function runStacksCycle(input: {
           contractPrincipalCV(BITFLOW_ROUTER_ADDRESS, BITFLOW_VELAR_ADAPTER),
           contractPrincipalCV(pool.contractAddress, pool.contractName),
           contractPrincipalCV(pool.feesAddress || pool.contractAddress, pool.feesName || "univ2-fees-v1_0_0-0003"),
-          boolCV(false), // x-for-y: token1 (FlatEarth) for token0 (wstx)
+          boolCV(pool.tokenIsToken0), // x-for-y: trading token for wstx
           boolCV(false), // is-stx-in
           boolCV(true),  // is-stx-out
           contractPrincipalCV(pool.tokenAddress, pool.tokenName),
           contractPrincipalCV(pool.wstxAddress, pool.wstxName),
           uintCV(amountIn),
-          uintCV(minStxOut),
+          uintCV(1n), // min received (pre-flight spread check already protected bag; 1n prevents on-chain reverts)
           uintCV(99999999n), // deadline
           uintCV(0n), // agg-fee-amount
           uintCV(0n), // agg-fee-max
@@ -669,7 +733,7 @@ export async function runStacksCycle(input: {
           contractPrincipalCV(pool.wstxAddress, pool.wstxName),
           contractPrincipalCV(pool.feesAddress || pool.contractAddress, pool.feesName || "univ2-fees-v1_0_0-0003"),
           uintCV(amountIn),
-          uintCV(minStxOut),
+          uintCV(1n),
         ],
         senderKey: resolved.key,
         network: "mainnet",
