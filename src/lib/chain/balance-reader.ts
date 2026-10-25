@@ -75,6 +75,33 @@ export async function fetchTokenPriceUsd(addressOrMint: string): Promise<number 
     }
   } catch {}
 
+  // Fallback for Stacks tokens: check Velar tokens API
+  try {
+    const isStacksContract = key.startsWith("SP") && key.includes(".");
+    if (isStacksContract) {
+      const res = await fetch("https://api.velar.co/tokens", {
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const tokensList = data.data || data;
+        const found = Array.isArray(tokensList)
+          ? tokensList.find(
+              (t: { contractAddress?: string }) =>
+                t.contractAddress === key || t.contractAddress?.toLowerCase() === key.toLowerCase(),
+            )
+          : null;
+        if (found?.price) {
+          const price = parseFloat(found.price);
+          if (price > 0) {
+            priceCache.set(key, { price, ts: Date.now() });
+            return price;
+          }
+        }
+      }
+    }
+  } catch {}
+
   return null;
 }
 
@@ -214,6 +241,7 @@ export async function readStacksWalletBalances(
       tokenAddress: contractId,
       symbol: t.symbol || "SIP-010",
       amount: numAmount.toLocaleString("en-US", { maximumFractionDigits: 6 }),
+      rawAmount: rawBalance,
       decimals: 6,
       priceUsd: price,
       balanceUsd,
