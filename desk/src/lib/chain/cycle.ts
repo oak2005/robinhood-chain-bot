@@ -16,7 +16,7 @@ const STATE_VIEW = "0xF3334192D15450CdD385c8B70e03f9A6bD9E673b";
 const MSTR = "0xec262a75e413fAfD0dF80480274532C79D42da09";
 const USDG = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
 const MSTR_USDG_POOL = "0x319bac87e616a89e241c10aeb8afd4892a852cdd8b373cd9765ecddc40b87cfe";
-const SWAP_GAS = 1_400_000n;
+const SWAP_GAS = 2_500_000n;
 
 const erc20Abi = [
   "function balanceOf(address) view returns (uint256)",
@@ -282,12 +282,13 @@ async function sendSwap(wallet: ethers.Wallet, data: string) {
   }
   // One leg may use at most about half the ETH, so the buy can still be paid.
   const affordable = price > 0n ? (balance * 46n) / 100n / price : estimated;
-  let gasLimit = estimated + estimated / 10n + 15_000n;
-  if (affordable >= estimated && affordable < gasLimit) gasLimit = affordable;
-  if (gasLimit > SWAP_GAS) gasLimit = SWAP_GAS;
-  if (gasLimit < estimated || affordable < estimated) {
+  if (affordable < estimated) {
     throw new Error(`Not enough ETH for gas (${ethers.formatEther(balance)}).`);
   }
+  let gasLimit = estimated + estimated / 10n + 15_000n;
+  if (gasLimit > SWAP_GAS) gasLimit = SWAP_GAS;
+  if (gasLimit < estimated) gasLimit = estimated;
+  if (affordable >= estimated && affordable < gasLimit) gasLimit = affordable;
   if (process.env.STILLMARK_DRY === "1") throw new Error(`dry static ok gas ${gasLimit.toString()}`);
   const feeData = await provider.getFeeData().catch(() => null);
   const txOverrides: Record<string, any> = { gasLimit };
