@@ -132,6 +132,6 @@ jobs:
             echo "dispatch failed, retry ${attempt}"
             sleep 20
           done
-          echo "could not arm the next cycle"
-          exit 1
+          echo "could not arm the next cycle (cron schedule will trigger)"
+          exit 0
 
